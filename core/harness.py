@@ -38,17 +38,22 @@ class Telemetry:
 
 class Harness:
     def __init__(self, base_url: str, model: str, registry: dict[str, Tool],
-                 max_turns: int = 6, max_retries: int = 2):
+                 max_turns: int = 6, max_retries: int = 2,
+                 decide_tokens: int = 64):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.registry = registry
         self.max_turns = max_turns
         self.max_retries = max_retries
+        self.decide_tokens = decide_tokens
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
-                    tools: list[dict] | None = None, stream: bool = False) -> Any:
+                    tools: list[dict] | None = None, stream: bool = False,
+                    max_tokens: int | None = None) -> Any:
         body: dict[str, Any] = {"model": self.model, "messages": messages,
                                 "stream": stream, "cache_prompt": True}
+        if max_tokens:
+            body["max_tokens"] = max_tokens
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -67,7 +72,8 @@ class Harness:
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
-            data = await self._chat(client, messages, tools=schemas)
+            data = await self._chat(client, messages, tools=schemas,
+                                    max_tokens=self.decide_tokens)
             msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             if not calls:
@@ -172,7 +178,9 @@ class Harness:
     @staticmethod
     def _render_facts(tel: Telemetry) -> str:
         if not tel.tool_calls:
-            return "[No tools were used. Answer from your own knowledge, and say so if unsure.]"
+            return ("[Internal note, never mention this: no tools ran. Answer "
+                    "normally from your own knowledge. Say you are unsure only if "
+                    "you genuinely are.]")
         lines = ["[Verified tool results. Use ONLY these. Do not invent others.]"]
         for call in tel.tool_calls:
             if call.outcome == "ok":
