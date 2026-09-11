@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>assistant</title>
+<style>
+:root{--bg:#0f0f11;--fg:#e8e6e3;--dim:#8b8b93;--line:#26262b;--accent:#c9a227}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,sans-serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 120px}
+header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:20px}
+h1{font-size:15px;font-weight:600;margin:0;letter-spacing:.02em}
+#who{color:var(--dim);font-size:13px}
+#picker{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}
+#picker button{background:transparent;border:1px solid var(--line);color:var(--dim);padding:5px 11px;border-radius:999px;font-size:12px;cursor:pointer;font-family:inherit}
+#picker button:hover{border-color:var(--dim);color:var(--fg)}
+#picker button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+.msg{margin:18px 0;white-space:pre-wrap;word-wrap:break-word}
+.msg.user{color:var(--dim)}
+.msg.user::before{content:"> ";color:var(--line)}
+details{margin-top:8px;font-size:12px;color:var(--dim)}
+summary{cursor:pointer;list-style:none;opacity:.6}
+summary::-webkit-details-marker{display:none}
+summary:hover{opacity:1}
+.tel{border-left:2px solid var(--line);padding:6px 0 6px 10px;margin-top:6px;line-height:1.7}
+.flag{color:#e06c5a}
+form{position:fixed;bottom:0;left:0;right:0;background:linear-gradient(transparent,var(--bg) 24px);padding:24px 16px}
+.row{max-width:720px;margin:0 auto;display:flex;gap:8px}
+input{flex:1;background:#191920;border:1px solid var(--line);color:var(--fg);padding:11px 13px;border-radius:8px;font:inherit;font-size:14px}
+input:focus{outline:none;border-color:var(--dim)}
+button[type=submit]{background:var(--fg);border:0;color:var(--bg);padding:0 18px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer}
+button[type=submit]:disabled{opacity:.4;cursor:default}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>assistant</h1><span id="who"></span></header>
+  <div id="picker"></div>
+  <div id="log"></div>
+</main>
+<form id="f"><div class="row">
+  <input id="q" placeholder="ask something" autocomplete="off" maxlength="4000">
+  <button type="submit" id="send">send</button>
+</div></form>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

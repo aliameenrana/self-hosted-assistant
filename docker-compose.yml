@@ -1,0 +1,62 @@
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    command: >
+      -m /models/Qwen3-8B-Q4_K_M.gguf --host 0.0.0.0 --port 8080
+      --n-gpu-layers 28 --ctx-size 8192 --parallel 2
+      --batch-size 512 --ubatch-size 128 --cache-reuse 256
+    volumes:
+      - ./models:/models:ro
+    networks: [private]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      LLM_BASE_URL: http://llama:8080
+      LLM_MODEL: qwen3-8b
+      DB_PATH: /data/app.db
+    env_file: .env
+    volumes:
+      - appdata:/data
+    networks: [private, egress]
+    depends_on: [llama]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./web/static:/srv:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    networks: [private, egress]
+    depends_on: [app]
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    networks: [private, egress]
+    depends_on: [caddy]
+    restart: unless-stopped
+    profiles: [public]
+
+networks:
+  # No route out. llama holds the weights and never needs the internet.
+  private:
+    internal: true
+  egress:
+
+volumes:
+  appdata:
+  caddydata:
