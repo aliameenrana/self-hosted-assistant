@@ -23,6 +23,24 @@ class ToolCall:
     ms: int = 0
 
 
+def _recap(history: list[dict]) -> str:
+    """Topics only, never prior assistant prose.
+
+    Splicing raw history into the voice pass let it read last turn's rendered
+    results as its own confident text and re-serve them for this turn. That is
+    where the Pixar film appeared in a pizza search.
+    """
+    asks = [m["content"].strip().replace("\n", " ")[:90]
+            for m in history if m.get("role") == "user"][-4:]
+    system = [m["content"] for m in history if m.get("role") == "system"]
+    parts = []
+    if asks:
+        parts.append("Earlier in this conversation the user asked about: "
+                     + "; ".join(asks))
+    parts.extend(system)
+    return "\n\n".join(parts)
+
+
 def strip_em_dashes(text: str) -> str:
     """Prompting for this failed repeatedly, so it is enforced after the fact.
 
@@ -41,8 +59,8 @@ REPAIR = {
                     "answer without a tool.",
     "bad_args": "The arguments were rejected. Read the error, fix them, and "
                 "call it once more.",
-    "tool_error": "The tool itself failed. Do not repeat the same call. Try a "
-                  "different tool or answer without one.",
+    "tool_error": "The tool itself failed. Do not repeat that exact call. Try "
+                  "a different tool, or stop and report the failure plainly.",
     "empty": "That returned nothing useful. A different query might work, or "
              "answer from your own knowledge and say the lookup came back empty.",
 }
@@ -92,14 +110,14 @@ class Harness:
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
                     tools: list[dict] | None = None, stream: bool = False,
-                    max_tokens: int | None = None) -> Any:
+                    max_tokens: int | None = None, force: bool = False) -> Any:
         body: dict[str, Any] = {"model": self.model, "messages": messages,
                                 "stream": stream, "cache_prompt": True}
         if max_tokens:
             body["max_tokens"] = max_tokens
         if tools:
             body["tools"] = tools
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = "required" if force else "auto"
         resp = await client.post(f"{self.base_url}/v1/chat/completions", json=body,
                                  timeout=180.0)
         resp.raise_for_status()
@@ -118,6 +136,7 @@ class Harness:
         schemas = [t.schema() for t in offered.values()]
         last_signature = None
         attempts: dict[str, int] = {}
+        forced = False
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
@@ -130,10 +149,23 @@ class Harness:
             calls = msg.get("tool_calls") or []
             said = (msg.get("content") or "").strip()
             if not calls:
-                tel.trace.append(
-                    f"turn {turn + 1}: chose no tool"
-                    + (f" — {said[:200]}" if said else ""))
-                return messages
+                # Omission is the dominant failure for models this size: it
+                # answers in prose while holding the tool. Force the call once
+                # rather than accept a refusal.
+                if schemas and not forced and REFUSAL.search(said):
+                    forced = True
+                    tel.trace.append(
+                        f"turn {turn + 1}: refused in prose, forcing the tool")
+                    data = await self._chat(client, messages, tools=schemas,
+                                            max_tokens=budget, force=True)
+                    msg = data["choices"][0]["message"]
+                    calls = msg.get("tool_calls") or []
+                    said = (msg.get("content") or "").strip()
+                if not calls:
+                    tel.trace.append(
+                        f"turn {turn + 1}: chose no tool"
+                        + (f" — {said[:200]}" if said else ""))
+                    return messages
             messages.append(msg)
 
             for call in calls:
@@ -227,11 +259,11 @@ class Harness:
             tel.trace.append(f"voice pass: {len(tel.tool_calls)} verified "
                              f"result(s) handed to the writer")
             facts = self._render_facts(tel)
-            messages = [
-                {"role": "system", "content": voice_prompt(persona)},
-                *(history or []),
-                {"role": "user", "content": f"{question}\n\n{facts}"},
-            ]
+            messages = [{"role": "system", "content": voice_prompt(persona)}]
+            recap = _recap(history or [])
+            if recap:
+                messages.append({"role": "system", "content": recap})
+            messages.append({"role": "user", "content": f"{question}\n\n{facts}"})
 
             body = {"model": self.model, "messages": messages, "stream": True,
                     "cache_prompt": True, "max_tokens": VOICE_MAX_TOKENS,
@@ -276,17 +308,40 @@ class Harness:
             return ("[Internal note, never mention this: no tools ran. Answer "
                     "normally from your own knowledge. Say you are unsure only if "
                     "you genuinely are.]")
-        lines = ["[Verified tool results. Use ONLY these. Do not invent others.]"]
-        for call in tel.tool_calls:
+        if all(c.outcome != "ok" for c in tel.tool_calls):
+            names = ", ".join(sorted({c.name for c in tel.tool_calls}))
+            return ("[Every lookup failed. Say in one clause that it came back "
+                    "with nothing, then stop. Do NOT speculate about why. Do "
+                    "NOT describe any results. Do NOT answer from memory as if "
+                    f"you had looked it up. Failed: {names}]")
+        lines = ["[Results from THIS message only. Earlier turns are gone. "
+                 "Use only what is listed here and never mention a result "
+                 "that is not below.]"]
+        for i, call in enumerate(tel.tool_calls, 1):
+            args = json.dumps(call.args, default=str)[:200]
             if call.outcome == "ok":
-                lines.append(f"{call.name}: {json.dumps(call.result, default=str)[:2000]}")
+                lines.append(f"[{i}] {call.name}{args} returned: "
+                             f"{json.dumps(call.result, default=str)[:2000]}")
             else:
-                lines.append(f"{call.name}: FAILED ({call.error}). Say so briefly.")
+                lines.append(f"[{i}] {call.name}{args} FAILED: {call.error}. "
+                             "Say so in one clause, do not explain why.")
         return "\n".join(lines)
 
 
 FABRICATION_MARKERS = ("i searched", "i ran a web search", "i looked it up",
                        "i fetched", "according to my search", "i found sources")
+
+# Must match registry names. These were web_search and fetch_url, which stopped
+# existing at the verb_noun rename, so this check silently passed on everything
+# and would have flagged every real search as a fabrication.
+LOOKUP_TOOLS = {"search_web", "read_url", "read_repo"}
+
+# Omission is the dominant small-model tool failure: the model answers in prose
+# instead of calling a tool it holds. Detected in code, not hoped away.
+REFUSAL = re.compile(
+    r"\b(cannot|can't|can not|unable to|don't have access|do not have access|"
+    r"no access to)\b[^.]{0,60}\b(retrieve|access|browse|open|search|"
+    r"real[- ]time|current|internet|web|live)\b", re.I)
 
 
 def detect_fabrication(text: str, tel: Telemetry) -> list[str]:
@@ -299,6 +354,6 @@ def detect_fabrication(text: str, tel: Telemetry) -> list[str]:
     lowered = text.lower()
     flags = []
     if any(m in lowered for m in FABRICATION_MARKERS) and not (
-            {"web_search", "fetch_url"} & ran):
+            LOOKUP_TOOLS & ran):
         flags.append("claimed_search_without_call")
     return flags
