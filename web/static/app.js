@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 const log = $("log"), hello = $("hello"), scroll = $("scroll");
 const input = $("q"), send = $("send"), who = $("who");
 
-let session = null, me = null, busy = false, attachment = null;
+let session = null, me = null, busy = false, attachment = null, controller = null;
 let lastModel = null;
 
 // Each one exercises a real tool call end to end, chosen because they
@@ -72,9 +72,26 @@ function turn(side, text) {
   return { row, bubble: b };
 }
 
-function thinking(bubble) {
-  bubble.innerHTML = `<span class="dots"><span></span><span></span><span></span></span>`;
+const STATUS_LABEL = {
+  search_web: "searching the web",
+  read_url: "reading the page",
+  calculate: "calculating",
+  get_datetime: "checking the time",
+  convert_units: "converting",
+  create_webpage: "building the page",
+  extract_structured: "reading the file",
+  diff_text: "comparing",
+  read_repo: "reading the repo",
+  search_memory: "checking earlier in this chat",
+  remember_fact: "noting that down",
+};
+
+function thinking(bubble, label) {
+  bubble.innerHTML = `<span class="dots"><span></span><span></span><span></span></span>` +
+    (label ? `<span class="status">${escapeHtml(label)}</span>` : "");
 }
+
+function escapeHtml(s) { return esc(s); }
 
 function render(bubble, text) {
   const parts = text.split(/```(?:[\w-]*)\n?/);
@@ -239,12 +256,14 @@ function clearAttachment() {
 
 $("f").onsubmit = async e => {
   e.preventDefault();
+  if (busy) { controller?.abort(); return; }
   const text = input.value.trim();
-  if (!text || busy) return;
+  if (!text) return;
   input.value = "";
   busy = true;
-  send.disabled = true;
+  send.textContent = "stop";
   hello.innerHTML = "";
+  controller = new AbortController();
 
   const label = attachment ? $("attached").querySelector("b").textContent : null;
   turn("you", label ? `📄 ${label}\n${text}` : text);
@@ -252,10 +271,12 @@ $("f").onsubmit = async e => {
   const { row, bubble } = turn("them", "");
   thinking(bubble);
 
+  let buf = "", out = "", fresh = false;
   try {
     const res = await fetch("/api/chat", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ session, message: text, attachment }),
+      signal: controller.signal,
     });
     if (!res.ok) {
       bubble.textContent = res.status === 503
@@ -263,7 +284,7 @@ $("f").onsubmit = async e => {
       return;
     }
     const reader = res.body.getReader(), dec = new TextDecoder();
-    let buf = "", out = "", fresh = !session;
+    buf = "", out = "", fresh = !session;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -276,6 +297,7 @@ $("f").onsubmit = async e => {
         if (ev.type === "queued")
           bubble.textContent = `${ev.position} ahead of you, they are almost certainly asking something worse`;
         else if (ev.type === "start") { session = ev.session; bubble.textContent = ""; thinking(bubble); }
+        else if (ev.type === "status") thinking(bubble, STATUS_LABEL[ev.tool] || "working on it");
         else if (ev.type === "token") { out += ev.text; render(bubble, out); at(); }
         else if (ev.type === "error") bubble.textContent = ev.message;
         else if (ev.type === "done") {
@@ -286,9 +308,15 @@ $("f").onsubmit = async e => {
         }
       }
     }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      if (out) render(bubble, out + "\u2003⏹");
+      else bubble.textContent = "stopped";
+    } else throw err;
   } finally {
     busy = false;
-    send.disabled = false;
+    controller = null;
+    send.textContent = "send";
     input.focus();
   }
 };

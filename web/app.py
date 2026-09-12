@@ -276,6 +276,8 @@ async def chat(ask: Ask, request: Request):
                     if ev["type"] == "token":
                         text += ev["text"]
                         yield _sse(ev)
+                    elif ev["type"] == "status":
+                        yield _sse(ev)
                     else:
                         tel = ev["telemetry"]
                         flags = detect_fabrication(text, tel) + check_citations(text, tel)

@@ -167,7 +167,7 @@ class Harness:
 
     async def _tool_pass(self, client: httpx.AsyncClient, question: str,
                          history: list[dict], tel: Telemetry,
-                         slot_id: int | None = None) -> list[dict]:
+                         slot_id: int | None = None, on_status=None) -> list[dict]:
         """Pass 1. Characterless. Returns verified tool results only."""
         messages = [{"role": "system", "content": TOOL_PROMPT}, *history,
                     {"role": "user", "content": question}]
@@ -264,6 +264,8 @@ class Harness:
                 except json.JSONDecodeError:
                     shown = (fn.get("arguments") or "")[:160]
                 tel.trace.append(f"turn {turn + 1}: call {name}({shown})")
+                if on_status:
+                    await on_status(name)
                 record = await self._run_tool(call, tel)
                 payload = dict(record)
                 failure = payload.pop("failure", None)
@@ -343,13 +345,30 @@ class Harness:
     async def answer(self, question: str, persona: str,
                      history: list[dict] | None = None,
                      slot_id: int | None = None) -> AsyncIterator[dict]:
+        import asyncio
+        status_queue: asyncio.Queue = asyncio.Queue()
+
+        async def on_status(tool_name: str) -> None:
+            await status_queue.put(tool_name)
+
         if persona not in PERSONAS:
             raise ValueError(f"unknown persona: {persona}")
         tel = Telemetry(model=self.model)
         started = time.monotonic()
 
         async with httpx.AsyncClient() as client:
-            await self._tool_pass(client, question, history or [], tel, slot_id)
+            tool_task = asyncio.create_task(
+                self._tool_pass(client, question, history or [], tel, slot_id,
+                                on_status))
+            while not tool_task.done():
+                get_status = asyncio.ensure_future(status_queue.get())
+                done, _ = await asyncio.wait(
+                    {tool_task, get_status}, return_when=asyncio.FIRST_COMPLETED)
+                if get_status in done:
+                    yield {"type": "status", "tool": get_status.result()}
+                else:
+                    get_status.cancel()
+            await tool_task
 
             tel.trace.append(f"voice pass: {len(tel.tool_calls)} verified "
                              f"result(s) handed to the writer")
