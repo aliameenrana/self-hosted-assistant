@@ -2,24 +2,12 @@ const $ = id => document.getElementById(id);
 const log = $("log"), hello = $("hello"), scroll = $("scroll");
 const input = $("q"), send = $("send"), who = $("who");
 
-let session = null, persona = null, personas = [], me = null, busy = false;
-
-const GREETINGS = {
-  vex: ["you again", "Ask. I was not doing anything important."],
-  wren: ["hello", "What are you actually trying to work out?"],
-  onyx: ["yes", "Ask."],
-  vela: ["oh good, someone", "Bring me something that is not boring."],
-  ash: ["morning", "Let me guess. It worked on your machine."],
-};
+let session = null, me = null, busy = false;
 
 const at = () => scroll.scrollTo(0, scroll.scrollHeight);
 
 async function boot() {
-  [personas, me] = await Promise.all([
-    fetch("/api/personas").then(r => r.json()),
-    fetch("/api/me").then(r => r.json()),
-  ]);
-  buildPicker();
+  me = await fetch("/api/me").then(r => r.json());
   renderAccount();
   await loadThreads();
   showWelcome();
@@ -39,7 +27,7 @@ async function loadThreads() {
   for (const t of rows) {
     const d = document.createElement("div");
     d.className = "thread" + (t.id === session ? " on" : "");
-    d.innerHTML = `${escape_(t.title || "untitled")}<small>${t.persona}</small>`;
+    d.innerHTML = escape_(t.title || "untitled");
     d.onclick = () => openThread(t.id);
     $("threads").append(d);
   }
@@ -47,29 +35,27 @@ async function loadThreads() {
 
 const escape_ = s => s.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
 
+const SUGGESTIONS = [
+  ["explain a concept", "how does a bloom filter actually work"],
+  ["review a decision", "should I use microservices for my side project"],
+  ["build something", "write me a landing page for a coffee shop"],
+  ["work a problem", "give me a hard leetcode problem and a hint"],
+];
+
 function showWelcome() {
   log.innerHTML = "";
-  hello.innerHTML = `<h2>five of them. one of you.</h2>
-    <p>Pick who you want, or just start typing and get whoever is around.
-    They will not flatter you and they will not pretend to have used a tool they did not.</p>
+  hello.innerHTML = `<h2>ask me something</h2>
+    <p>It runs on a gaming laptop, so it thinks at about twenty words a second.
+    It will not flatter you and it will not claim to have used a tool it did not.</p>
     <div class="cards"></div>`;
   const cards = hello.querySelector(".cards");
-  for (const p of personas) {
+  for (const [label, prompt] of SUGGESTIONS) {
     const b = document.createElement("button");
     b.className = "card";
-    b.innerHTML = `<b>${p.name}</b><span>${p.tagline}</span>`;
-    b.onclick = () => { persona = p.key; greet(p); };
+    b.innerHTML = `<b>${label}</b><span>${prompt}</span>`;
+    b.onclick = () => { input.value = prompt; $("f").requestSubmit(); };
     cards.append(b);
   }
-}
-
-function greet(p) {
-  hello.innerHTML = "";
-  log.innerHTML = "";
-  who.innerHTML = `talking to <b>${p.name}</b>`;
-  const [, line] = GREETINGS[p.key] || ["", "Go on then."];
-  add("bot", line);
-  input.focus();
 }
 
 function add(cls, text) {
@@ -88,38 +74,15 @@ function note(text) {
   log.append(d);
 }
 
-function buildPicker() {
-  const list = $("picklist");
-  list.innerHTML = "";
-  for (const p of personas) {
-    const b = document.createElement("button");
-    b.className = "card";
-    b.innerHTML = `<b>${p.name}</b><span>${p.tagline}</span>`;
-    b.onclick = () => {
-      $("pick").close();
-      if (!session) { persona = p.key; greet(p); return; }
-      persona = p.key;
-      who.innerHTML = `talking to <b>${p.name}</b>`;
-      note(`${p.name} took over.`);
-      at();
-    };
-    list.append(b);
-  }
-}
-
 async function openThread(id) {
   const d = await fetch(`/api/session/${id}`).then(r => r.json());
   session = id;
-  persona = d.persona;
   hello.innerHTML = "";
   log.innerHTML = "";
-  who.innerHTML = `talking to <b>${name_(d.persona)}</b>`;
   for (const m of d.messages) add(m.role === "user" ? "user" : "bot", m.content);
   await loadThreads();
   at();
 }
-
-const name_ = k => (personas.find(p => p.key === k) || {}).name || k;
 
 function telemetry(node, t) {
   const d = document.createElement("details");
@@ -153,7 +116,7 @@ $("f").onsubmit = async e => {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ session, persona, message: text }),
+      body: JSON.stringify({ session, message: text }),
     });
     if (!res.ok) {
       node.textContent = res.status === 503
@@ -175,8 +138,6 @@ $("f").onsubmit = async e => {
           node.textContent = `${ev.position} ahead of you. they are almost certainly asking something worse.`;
         else if (ev.type === "start") {
           session = ev.session;
-          persona = ev.persona;
-          who.innerHTML = `talking to <b>${name_(ev.persona)}</b>`;
           node.textContent = "";
         }
         else if (ev.type === "token") { node.textContent += ev.text; at(); }
@@ -191,9 +152,7 @@ $("f").onsubmit = async e => {
   }
 };
 
-$("switch").onclick = () => $("pick").showModal();
 $("burger").onclick = () => $("side").classList.toggle("hidden");
-$("newchat").onclick = () => { session = null; persona = null; who.textContent = ""; showWelcome(); loadThreads(); };
-$("pick").onclick = e => { if (e.target.id === "pick") $("pick").close(); };
+$("newchat").onclick = () => { session = null; showWelcome(); loadThreads(); };
 
 boot();

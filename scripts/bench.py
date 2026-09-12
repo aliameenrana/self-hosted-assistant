@@ -1,6 +1,6 @@
 import json, sys, time, urllib.request
 
-URL = "http://127.0.0.1:8080/v1/chat/completions"
+URL = "http://127.0.0.1:8090/v1/chat/completions"
 
 def run(prompt, think=False, max_tokens=200):
     sys_msg = "You are helpful." if think else "/no_think You are helpful."

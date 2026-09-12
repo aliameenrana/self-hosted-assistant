@@ -27,7 +27,7 @@ QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
 SLOTS = int(os.getenv("PARALLEL_SLOTS", "2"))
 
 harness = Harness(
-    os.getenv("LLM_BASE_URL", "http://localhost:8080"),
+    os.getenv("LLM_BASE_URL", "http://localhost:8090"),
     os.getenv("LLM_MODEL", "qwen3-8b"),
     WEB_TOOLS,
     max_turns=int(os.getenv("MAX_TURNS", "6")),
