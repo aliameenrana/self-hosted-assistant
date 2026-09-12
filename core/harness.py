@@ -145,6 +145,7 @@ class Harness:
         self.decide_tokens = decide_tokens
         self.continuation_tokens = continuation_tokens
         self.router = None
+        self.episodic = None
 
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
@@ -167,7 +168,8 @@ class Harness:
 
     async def _tool_pass(self, client: httpx.AsyncClient, question: str,
                          history: list[dict], tel: Telemetry,
-                         slot_id: int | None = None, on_status=None) -> list[dict]:
+                         slot_id: int | None = None, on_status=None,
+                         session_id: str | None = None) -> list[dict]:
         """Pass 1. Characterless. Returns verified tool results only."""
         messages = [{"role": "system", "content": TOOL_PROMPT}, *history,
                     {"role": "user", "content": question}]
@@ -177,6 +179,18 @@ class Harness:
         if self.router:
             offered, tel.tools_offered = self.router.select(question, self.registry)
         schemas = [t.schema() for t in offered.values()]
+
+        # A cheap, cheerless nudge if a similarly worded query already failed
+        # on one of the tools being offered. No model call, no vector store,
+        # just a lookup against a small table of past failures.
+        if self.episodic:
+            for name in offered:
+                warning = self.episodic.warn(name, question)
+                if warning:
+                    messages.append({"role": "system", "content":
+                                     f"Heads up before you decide: {warning}"})
+                    tel.trace.append(f"episodic: {warning}")
+                    break  # one nudge is enough, more is noise
         last_signature = None
         attempts: dict[str, int] = {}
         forced = False
@@ -266,7 +280,7 @@ class Harness:
                 tel.trace.append(f"turn {turn + 1}: call {name}({shown})")
                 if on_status:
                     await on_status(name)
-                record = await self._run_tool(call, tel)
+                record = await self._run_tool(call, tel, session_id)
                 payload = dict(record)
                 failure = payload.pop("failure", None)
                 if failure:
@@ -285,7 +299,8 @@ class Harness:
                                  "content": json.dumps(payload, default=str)[:8000]})
         return messages
 
-    async def _run_tool(self, call: dict, tel: Telemetry) -> dict:
+    async def _run_tool(self, call: dict, tel: Telemetry,
+                        session_id: str | None = None) -> dict:
         """Execute once and classify. Recovery is the caller's job, because a
         retry that resends identical arguments produces an identical failure.
         """
@@ -311,11 +326,22 @@ class Harness:
             return {"failure": "unknown_tool",
                     "error": f"no tool named {name}. Available: {sorted(self.registry)}"}
 
+        # Prefer the longest string argument. A dict's first value is not
+        # reliably the meaningful one - convert_units puts a number first,
+        # so "5" was being recorded as the episodic query instead of the
+        # actual units, making the warning useless.
+        strings = [v for v in args.values() if isinstance(v, str)] if args else []
+        query_arg = max(strings, key=len, default="")
+        if not query_arg and args:
+            query_arg = " ".join(str(v) for v in args.values())
         try:
             result = execute(self.registry, name, args)
         except ToolError as exc:
             tel.tool_calls.append(ToolCall(name, args, "bad_args", error=str(exc),
                                            ms=elapsed()))
+            if self.episodic:
+                self.episodic.record_failure(name, str(query_arg), "bad_args",
+                                             session_id or "")
             return {"failure": "bad_args", "error": str(exc)}
         except Exception as exc:
             tel.tool_calls.append(ToolCall(name, args, "tool_error",
@@ -326,6 +352,9 @@ class Harness:
         if _is_empty(result):
             tel.tool_calls.append(ToolCall(name, args, "empty", result=result,
                                            ms=elapsed()))
+            if self.episodic:
+                self.episodic.record_failure(name, str(query_arg), "returned "
+                                             "nothing", session_id or "")
             return {"failure": "empty", "result": result,
                     "error": f"{name} returned nothing useful"}
 
@@ -335,6 +364,10 @@ class Harness:
             if score == 0:
                 tel.tool_calls.append(ToolCall(name, args, "irrelevant",
                                                result=result, ms=elapsed()))
+                if self.episodic:
+                    self.episodic.record_failure(name, str(query_arg),
+                                                 "returned off-topic results",
+                                                 session_id or "")
                 return {"failure": "irrelevant", "result": result,
                         "error": f"{name} returned results with no overlap "
                                  "with the query, likely off-topic"}
@@ -344,7 +377,8 @@ class Harness:
 
     async def answer(self, question: str, persona: str,
                      history: list[dict] | None = None,
-                     slot_id: int | None = None) -> AsyncIterator[dict]:
+                     slot_id: int | None = None,
+                     session_id: str | None = None) -> AsyncIterator[dict]:
         import asyncio
         status_queue: asyncio.Queue = asyncio.Queue()
 
@@ -359,7 +393,7 @@ class Harness:
         async with httpx.AsyncClient() as client:
             tool_task = asyncio.create_task(
                 self._tool_pass(client, question, history or [], tel, slot_id,
-                                on_status))
+                                on_status, session_id))
             while not tool_task.done():
                 get_status = asyncio.ensure_future(status_queue.get())
                 done, _ = await asyncio.wait(
