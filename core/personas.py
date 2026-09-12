@@ -74,6 +74,11 @@ class Persona:
 PERSONAS = {"default": Persona("default", "the assistant", "sharp, brief, useful")}
 
 
+# Measured: think mode is 79 percent slower (28.6s vs 16.0s mean, 3 cases) for
+# no measurable correctness gain on this model at this size. One case showed
+# think citing a source no-think missed, not enough to justify the cost on a
+# 16 tok/s machine. Revisit if citation compliance turns out to matter more
+# than latency. See /tmp/nothink_ab.py for the harness.
 def voice_prompt(persona_key: str = "default", think: bool = False) -> str:
     prefix = "" if think else f"{NO_THINK}\n"
     return f"""{prefix}{HARD_RULES}
