@@ -1,5 +1,6 @@
 import ast
 import operator
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -19,6 +20,7 @@ FETCH_ALLOWLIST = {
 }
 
 MAX_FETCH_BYTES = 200_000
+USER_AGENT = "self-hosted-assistant/0.1 (personal project)"
 
 
 def _datetime(timezone_name: str = "UTC") -> dict[str, Any]:
@@ -69,12 +71,16 @@ def _calculator(expression: str) -> dict[str, Any]:
 def _web_search(query: str) -> dict[str, Any]:
     if len(query) > 300:
         raise ToolError("query too long")
-    resp = httpx.get(
-        "https://api.duckduckgo.com/",
-        params={"q": query, "format": "json", "no_html": 1},
-        timeout=10.0,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": 1},
+            timeout=10.0, headers={"User-Agent": USER_AGENT},
+        )
+    except httpx.RequestError as exc:
+        raise ToolError(f"search failed: {type(exc).__name__}") from exc
+    if resp.status_code >= 400:
+        raise ToolError(f"search returned {resp.status_code}")
     data = resp.json()
     results = [
         {"title": t.get("Text", ""), "url": t.get("FirstURL", "")}
@@ -85,15 +91,36 @@ def _web_search(query: str) -> dict[str, Any]:
 
 
 def _fetch_url(url: str) -> dict[str, Any]:
+    """Allowlisted hosts, port 443 only, no redirects, capped response.
+
+    The host check alone was not enough: an allowlisted hostname on an
+    arbitrary port (https://en.wikipedia.org:22/) passed and attempted the
+    connection. Redirects stay off so an allowlisted host cannot forward the
+    fetch to somewhere internal.
+    """
     from urllib.parse import urlparse
 
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise ToolError("https only")
-    if parsed.hostname not in FETCH_ALLOWLIST:
-        raise ToolError(f"domain not allowed: {parsed.hostname}")
-    resp = httpx.get(url, timeout=10.0, follow_redirects=False)
-    resp.raise_for_status()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host not in FETCH_ALLOWLIST:
+        raise ToolError(f"domain not allowed: {host}")
+    if parsed.port not in (None, 443):
+        raise ToolError("port 443 only")
+
+    try:
+        resp = httpx.get(url, timeout=10.0, follow_redirects=False,
+                         headers={"User-Agent": USER_AGENT})
+    except httpx.RequestError as exc:
+        raise ToolError(f"could not reach it: {type(exc).__name__}") from exc
+    if resp.is_redirect:
+        raise ToolError("that page redirects, which is not followed")
+    if resp.status_code >= 400:
+        raise ToolError(f"the page returned {resp.status_code}")
+    if "html" not in resp.headers.get("content-type", "") and \
+       "text" not in resp.headers.get("content-type", ""):
+        raise ToolError("not a text page")
     return {"url": url, "content": resp.text[:MAX_FETCH_BYTES]}
 
 
@@ -115,6 +142,102 @@ class Tool:
         }
 
 
+def _diff_text(before: str, after: str) -> dict[str, Any]:
+    import difflib
+    a, b = before.splitlines(), after.splitlines()
+    if len(a) > 2000 or len(b) > 2000:
+        raise ToolError("too long to diff, 2000 lines each maximum")
+    diff = list(difflib.unified_diff(a, b, "before", "after", lineterm="", n=2))
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    ratio = difflib.SequenceMatcher(None, before, after).ratio()
+    return {"diff": "\n".join(diff)[:8000] or "(identical)",
+            "lines_added": added, "lines_removed": removed,
+            "similarity": round(ratio, 3)}
+
+
+_UNITS = {
+    "length": {"m": 1.0, "km": 1000.0, "cm": .01, "mm": .001, "mi": 1609.344,
+               "yd": .9144, "ft": .3048, "in": .0254, "nmi": 1852.0},
+    "mass": {"kg": 1.0, "g": .001, "mg": 1e-6, "t": 1000.0, "lb": .45359237,
+             "oz": .028349523125, "st": 6.35029318},
+    "volume": {"l": 1.0, "ml": .001, "m3": 1000.0, "gal": 3.785411784,
+               "qt": .946352946, "pt": .473176473, "cup": .2365882365,
+               "floz": .0295735295625},
+    "time": {"s": 1.0, "min": 60.0, "h": 3600.0, "day": 86400.0,
+             "week": 604800.0, "ms": .001},
+    "data": {"b": 1.0, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,
+             "kib": 1024.0, "mib": 1048576.0, "gib": 1073741824.0},
+    "speed": {"mps": 1.0, "kph": .277777778, "mph": .44704, "kn": .514444},
+}
+_TEMP = {"c", "f", "k"}
+
+
+def _convert_units(value: float, from_unit: str, to_unit: str) -> dict[str, Any]:
+    src, dst = from_unit.lower().strip(), to_unit.lower().strip()
+    if src in _TEMP or dst in _TEMP:
+        if src not in _TEMP or dst not in _TEMP:
+            raise ToolError("cannot convert temperature to a non temperature unit")
+        celsius = {"c": value, "f": (value - 32) * 5 / 9,
+                   "k": value - 273.15}[src]
+        out = {"c": celsius, "f": celsius * 9 / 5 + 32,
+               "k": celsius + 273.15}[dst]
+        return {"value": value, "from": src, "to": dst, "result": round(out, 6)}
+    for family, table in _UNITS.items():
+        if src in table and dst in table:
+            return {"value": value, "from": src, "to": dst, "family": family,
+                    "result": round(value * table[src] / table[dst], 9)}
+    known = sorted({u for t in _UNITS.values() for u in t} | _TEMP)
+    raise ToolError(f"unknown or mismatched units. Known: {', '.join(known)}")
+
+
+def _read_repo(repo: str, path: str = "") -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or ".." in repo:
+        raise ToolError("repo must look like owner/name")
+    if ".." in path:
+        raise ToolError("invalid path")
+    url = f"https://api.github.com/repos/{repo}/contents/{path.lstrip('/')}"
+    resp = httpx.get(url, timeout=12.0,
+                     headers={"Accept": "application/vnd.github+json"})
+    if resp.status_code == 404:
+        raise ToolError(f"not found: {repo}/{path}")
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, list):
+        return {"repo": repo, "path": path or "/",
+                "entries": [{"name": e["name"], "type": e["type"],
+                             "size": e.get("size", 0)} for e in data[:100]]}
+    if data.get("encoding") != "base64":
+        raise ToolError("that file is not readable as text")
+    import base64
+    try:
+        text = base64.b64decode(data["content"]).decode("utf-8")
+    except UnicodeDecodeError:
+        raise ToolError("that file is binary")
+    return {"repo": repo, "path": path, "size": data.get("size", 0),
+            "content": text[:20000],
+            "truncated": len(text) > 20000}
+
+
+def _extract_structured(text: str, fields: str) -> dict[str, Any]:
+    """Return the text alongside the requested shape.
+
+    No model call of its own. The tool exists so the model commits to a field
+    list first, which makes the extraction that follows far more consistent
+    than asking for JSON in prose.
+    """
+    wanted = [f.strip() for f in fields.split(",") if f.strip()]
+    if not wanted:
+        raise ToolError("list at least one field, comma separated")
+    if len(wanted) > 25:
+        raise ToolError("25 fields maximum")
+    return {"fields": wanted, "source_chars": len(text),
+            "text": text[:20000],
+            "instruction": ("Return exactly these fields as JSON. Use null for "
+                            "anything the text does not state. Do not invent "
+                            "values.")}
+
+
 def _obj(props: dict, required: list[str]) -> dict:
     return {"type": "object", "properties": props, "required": required,
             "additionalProperties": False}
@@ -131,9 +254,11 @@ WEB_TOOLS: dict[str, Tool] = {
     t.name: t
     for t in [
         Tool("get_datetime",
-             "Current date and time in UTC. Use when the answer depends on "
-             "today's date, the current time, or how long until something. "
-             "Do not use for historical dates you already know.",
+             "The real current date and time, right now. You do NOT otherwise "
+             "know what day it is, so call this for any question about today, "
+             "the date, the time, the day of the week, what year it is, or how "
+             "long until something. Never say you lack real time information: "
+             "this tool is that information. Do not use for historical dates.",
              _obj({"timezone_name": {"type": "string"}}, []), _datetime),
         Tool("calculate",
              "Evaluate an arithmetic expression and return the exact result. "
@@ -161,6 +286,42 @@ WEB_TOOLS: dict[str, Tool] = {
              _obj({"url": {"type": "string",
                            "description": "Full https URL."}},
                   ["url"]), _fetch_url),
+        Tool("extract_structured",
+             "Pull named fields out of unstructured text as JSON. Use for CVs, "
+             "invoices, emails, listings, anything where specific values are "
+             "wanted. Name the fields you want. Do not use for summarising or "
+             "for free-form questions.",
+             _obj({"text": {"type": "string", "description": "Text to read."},
+                   "fields": {"type": "string",
+                              "description": "Comma separated, e.g. "
+                                             "name,email,years_experience"}},
+                  ["text", "fields"]), _extract_structured),
+        Tool("diff_text",
+             "Compare two blocks of text and show what changed, with counts "
+             "and a similarity score. Use when asked what changed between two "
+             "versions, to compare drafts, or to check an edit. Do not use to "
+             "compare meaning or to review a single document.",
+             _obj({"before": {"type": "string", "description": "Original text."},
+                   "after": {"type": "string", "description": "Revised text."}},
+                  ["before", "after"]), _diff_text),
+        Tool("convert_units",
+             "Convert between units of length, mass, volume, time, data size, "
+             "speed or temperature. Use whenever a value needs expressing in "
+             "different units. Do not use for currency, which changes daily.",
+             _obj({"value": {"type": "number"},
+                   "from_unit": {"type": "string",
+                                 "description": "e.g. km, lb, floz, gib, c"},
+                   "to_unit": {"type": "string"}},
+                  ["value", "from_unit", "to_unit"]), _convert_units),
+        Tool("read_repo",
+             "List a directory or read a file from a PUBLIC GitHub repository. "
+             "Use when asked about the contents of a named repo. Pass repo as "
+             "owner/name and an optional path. Do not use for private repos or "
+             "to guess at repos that may not exist.",
+             _obj({"repo": {"type": "string", "description": "owner/name"},
+                   "path": {"type": "string",
+                            "description": "File or directory, empty for root."}},
+                  ["repo"]), _read_repo),
         Tool("create_webpage",
              "Publish a complete HTML page and get back a link the user can "
              "open. Use when asked to build, make, or design a page, site, "

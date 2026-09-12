@@ -22,6 +22,7 @@ from core.harness import Harness, detect_fabrication
 from core.memory import Memory
 from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
+from core.tools.memory_tools import build as build_memory_tools
 from web import auth
 
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
@@ -247,6 +248,11 @@ async def chat(ask: Ask, request: Request):
             async with _slots:
                 yield _sse({"type": "start", "session": session,
                             "persona": persona, "switched_from": switched_from})
+                # Memory tools are bound to this owner and session, so the
+                # model cannot reach another user's history.
+                harness.registry = {
+                    **WEB_TOOLS,
+                    **build_memory_tools(memory, session, owner)}
                 text = ""
                 async for ev in harness.answer(question, persona,
                                                history=history):
