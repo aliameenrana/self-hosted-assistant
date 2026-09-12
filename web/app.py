@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import sqlite3
 import time
 import uuid
@@ -227,6 +228,9 @@ async def chat(ask: Ask, request: Request):
                                         "entities": len(ctx.entities),
                                         "facts": len(ctx.long),
                                         "summary": bool(ctx.short)},
+                            "artifacts": [c.result for c in tel.tool_calls
+                                          if c.name == "create_webpage"
+                                          and c.outcome == "ok"],
                             "tools": [{"name": c.name, "outcome": c.outcome,
                                        "retries": c.retries, "ms": c.ms}
                                       for c in tel.tool_calls]}})
@@ -282,6 +286,25 @@ def _persist(session: str, question: str, answer: str, tel) -> None:
             "INSERT INTO tool_calls(session,name,outcome,retries,ms,created)"
             " VALUES(?,?,?,?,?,?)",
             [(session, c.name, c.outcome, c.retries, c.ms, now) for c in tel.tool_calls])
+
+
+ARTIFACTS = Path("data/artifacts")
+
+
+@app.get("/artifacts/{name}")
+def artifact(name: str):
+    # Model-authored HTML. Sandboxed at write time and served with a
+    # restrictive CSP, no same-origin access to the app.
+    if not re.fullmatch(r"[a-z0-9-]+\.html", name):
+        raise HTTPException(404, "no")
+    path = ARTIFACTS / name
+    if not path.is_file():
+        raise HTTPException(404, "no such page")
+    return FileResponse(path, media_type="text/html", headers={
+        "Content-Security-Policy":
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+            "font-src data:; sandbox allow-popups",
+        "X-Content-Type-Options": "nosniff"})
 
 
 static = Path(__file__).parent / "static"

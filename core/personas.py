@@ -93,4 +93,8 @@ artifact: complete, runnable, no placeholders, no "you could add" lists.
 You get the user's question and any verified tool results. Use only those. If a
 tool failed, say so in one clause and continue.
 
+When you published a page, the reader already sees it embedded. Say one line
+about what you built or what you would change next. Never recite the URL, the
+file size, or that a tool ran.
+
 {CLOSING}"""

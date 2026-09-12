@@ -5,6 +5,8 @@ from typing import Any, Callable
 
 import httpx
 
+from .artifacts import create_page
+
 
 class ToolError(Exception):
     pass
@@ -118,17 +120,59 @@ def _obj(props: dict, required: list[str]) -> dict:
             "additionalProperties": False}
 
 
+def _create_webpage(title: str, html: str) -> dict[str, Any]:
+    try:
+        return create_page(title, html)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 WEB_TOOLS: dict[str, Tool] = {
     t.name: t
     for t in [
-        Tool("datetime", "Current date and time in UTC.",
+        Tool("get_datetime",
+             "Current date and time in UTC. Use when the answer depends on "
+             "today's date, the current time, or how long until something. "
+             "Do not use for historical dates you already know.",
              _obj({"timezone_name": {"type": "string"}}, []), _datetime),
-        Tool("calculator", "Evaluate an arithmetic expression.",
-             _obj({"expression": {"type": "string"}}, ["expression"]), _calculator),
-        Tool("web_search", "Search the web for current information.",
-             _obj({"query": {"type": "string"}}, ["query"]), _web_search),
-        Tool("fetch_url", "Fetch a page from an allowlisted domain.",
-             _obj({"url": {"type": "string"}}, ["url"]), _fetch_url),
+        Tool("calculate",
+             "Evaluate an arithmetic expression and return the exact result. "
+             "Use for any arithmetic beyond trivial mental maths, especially "
+             "large numbers where being off by one matters. Do not use for "
+             "algebra, symbolic maths, or anything needing variables.",
+             _obj({"expression": {
+                 "type": "string",
+                 "description": "Arithmetic only, e.g. '4871 * 392'. "
+                                "No functions, no variables."}},
+                  ["expression"]), _calculator),
+        Tool("search_web",
+             "Search the web and return titles, URLs and a summary. Use for "
+             "current events, recent releases, or anything after your training "
+             "data. Do not use for general knowledge you already have, or for "
+             "opinions and reasoning.",
+             _obj({"query": {
+                 "type": "string",
+                 "description": "Search keywords, not a full sentence."}},
+                  ["query"]), _web_search),
+        Tool("read_url",
+             "Fetch the text of a specific web page. Use only when the user "
+             "gives a URL or a search result needs reading in full. Only "
+             "allowlisted domains work. Do not guess URLs.",
+             _obj({"url": {"type": "string",
+                           "description": "Full https URL."}},
+                  ["url"]), _fetch_url),
+        Tool("create_webpage",
+             "Publish a complete HTML page and get back a link the user can "
+             "open. Use when asked to build, make, or design a page, site, "
+             "dashboard, chart, game, or any visual artifact. Write the whole "
+             "document with inline CSS. Do not use for code the user wants to "
+             "read rather than view, or for plain text answers.",
+             _obj({"title": {"type": "string",
+                             "description": "Short name for the page."},
+                   "html": {"type": "string",
+                            "description": "Complete HTML document with inline "
+                                           "<style>. No external files."}},
+                  ["title", "html"]), _create_webpage),
     ]
 }
 

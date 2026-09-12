@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -20,6 +21,17 @@ class ToolCall:
     error: str | None = None
     retries: int = 0
     ms: int = 0
+
+
+def strip_em_dashes(text: str) -> str:
+    """Prompting for this failed repeatedly, so it is enforced after the fact.
+
+    Spaced em dash becomes a comma, unspaced becomes a comma plus space.
+    En dash between digits is a range and is left alone.
+    """
+    text = re.sub(r"\s*\u2014\s*", ", ", text)
+    text = re.sub(r"(?<![0-9])\s*\u2013\s*(?![0-9])", ", ", text)
+    return re.sub(r",\s*,", ",", text)
 
 
 REPAIR = {
@@ -65,13 +77,15 @@ class Telemetry:
 class Harness:
     def __init__(self, base_url: str, model: str, registry: dict[str, Tool],
                  max_turns: int = 6, max_retries: int = 2,
-                 decide_tokens: int = 64):
+                 decide_tokens: int = 64, content_tokens: int = 2600):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.registry = registry
         self.max_turns = max_turns
         self.max_retries = max_retries
         self.decide_tokens = decide_tokens
+        self.content_tokens = content_tokens
+        self.bulky = {"create_webpage"}
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
                     tools: list[dict] | None = None, stream: bool = False,
@@ -99,8 +113,11 @@ class Harness:
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
+            budget = (self.content_tokens
+                      if self.bulky & set(self.registry)
+                      else self.decide_tokens)
             data = await self._chat(client, messages, tools=schemas,
-                                    max_tokens=self.decide_tokens)
+                                    max_tokens=budget)
             msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             if not calls:
@@ -196,6 +213,7 @@ class Harness:
                     "cache_prompt": True, "max_tokens": VOICE_MAX_TOKENS,
                     "stop": STOP}
             first = True
+            pending = ""
             async with client.stream("POST", f"{self.base_url}/v1/chat/completions",
                                      json=body, timeout=180.0) as resp:
                 resp.raise_for_status()
@@ -215,8 +233,16 @@ class Harness:
                     if first:
                         tel.ttft_ms = int((time.monotonic() - started) * 1000)
                         first = False
-                    yield {"type": "token", "text": delta}
+                    pending += delta
+                    # Hold a trailing dash until the next chunk shows whether a
+                    # space follows, otherwise spacing is applied wrongly.
+                    if pending[-1] in "\u2014\u2013":
+                        continue
+                    yield {"type": "token", "text": strip_em_dashes(pending)}
+                    pending = ""
 
+        if pending:
+            yield {"type": "token", "text": strip_em_dashes(pending)}
         tel.total_ms = int((time.monotonic() - started) * 1000)
         yield {"type": "done", "telemetry": tel}
 

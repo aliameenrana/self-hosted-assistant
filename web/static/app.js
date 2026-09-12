@@ -84,6 +84,18 @@ async function openThread(id) {
   at();
 }
 
+function artifact(node, a) {
+  const box = document.createElement("div");
+  box.className = "artifact";
+  box.innerHTML = `<div class="abar"><b></b><a target="_blank">open</a></div>
+    <iframe sandbox="allow-popups" loading="lazy"></iframe>`;
+  box.querySelector("b").textContent = a.title;
+  box.querySelector("a").href = a.url;
+  box.querySelector("iframe").src = a.url;
+  node.append(box);
+  at();
+}
+
 function telemetry(node, t) {
   const d = document.createElement("details");
   const tools = t.tools.length
@@ -142,7 +154,11 @@ $("f").onsubmit = async e => {
         }
         else if (ev.type === "token") { node.textContent += ev.text; at(); }
         else if (ev.type === "error") node.textContent = ev.message;
-        else if (ev.type === "done") { telemetry(node, ev.telemetry); if (fresh) loadThreads(); }
+        else if (ev.type === "done") {
+          for (const a of ev.telemetry.artifacts || []) artifact(node, a);
+          telemetry(node, ev.telemetry);
+          if (fresh) loadThreads();
+        }
       }
     }
   } finally {
