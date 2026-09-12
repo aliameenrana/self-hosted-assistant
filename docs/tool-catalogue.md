@@ -99,5 +99,16 @@ The known failure mode is vocabulary mismatch: a user says "how much is" and
 the tool says "arithmetic". Mitigate by writing descriptions in user language
 and adding example phrasings to each tool's embedded text.
 
-**Do not build this until there are more than eight tools.** At five, passing
-them all is correct and retrieval only adds a way to be wrong.
+**Built, and measured.** At eleven tools the lexical hybrid wins outright:
+
+| | Top-1 | recall@k | per query | cost |
+|---|---|---|---|---|
+| lexical BM25 + TF-IDF | 88% | 100% | 0.03ms | none |
+| MiniLM-L6-v2 embeddings | 83% | 88% | 5ms | 1GB venv, 11GB cache, 162s load |
+
+The published numbers favour embeddings (38% vs 21% Top-1) but were measured
+over 270 to 2,792 tools. At this scale there is nothing to disambiguate, and
+writing trigger words in user language moved Top-1 further (62 to 88 percent)
+than any change of algorithm.
+
+Revisit if the catalogue passes a few hundred tools.

@@ -6,12 +6,19 @@ and we now have eleven. Retrieval keeps the offered set small.
 Scoring is a hybrid of BM25 and TF-IDF, plus regex patterns for shapes that
 neither can see.
 
-Measured comparison on MCP tool discovery, 270 tools over 2,700 queries:
-BM25 alone 14 percent Top-1, BM25 plus TF-IDF 21 percent, embeddings 38
-percent. Embeddings win on Top-1 but need a model, a vector store and index
-management, and the same source puts the crossover at roughly 2,000 tools.
-We have eleven, so the lexical hybrid is the right tier: sub-millisecond, no
-extra process, nothing competing for GPU.
+Embeddings were measured against this and lost, on our own tool set:
+
+    lexical      top1 88%   recall@k 100%   0.03ms/query
+    MiniLM-L6    top1 83%   recall@k  88%   5ms/query, 162s load, ~11GB cache
+
+That inverts the published result (BM25 14 percent Top-1, BM25 plus TF-IDF 21,
+embeddings 38) because those benchmarks ran 270 to 2,792 tools, where lexical
+scoring drowns in near-duplicate names. At eleven tools with hand-written
+triggers there is nothing to disambiguate, and the same source puts the
+crossover at roughly 2,000 tools.
+
+Revisit embeddings if the catalogue passes a few hundred tools. Until then
+they cost a gigabyte of dependencies to be worse.
 
 Alpha is 0.2 on BM25 and 0.8 on TF-IDF, which is where that study found the
 optimum across the full range.
