@@ -4,6 +4,9 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+import ipaddress
+import socket
+
 import httpx
 
 from .artifacts import create_page
@@ -13,11 +16,18 @@ class ToolError(Exception):
     pass
 
 
-FETCH_ALLOWLIST = {
-    "en.wikipedia.org",
-    "duckduckgo.com",
-    "api.duckduckgo.com",
-}
+# An allowlist of three domains was correct when nothing produced URLs. Now
+# that search returns real results, a fetcher that cannot open them is
+# useless. The boundary moves from "which host" to "not the private network":
+# public DNS only, port 443 only, no redirects, size capped.
+BLOCKED_NETS = [
+    ipaddress.ip_network(n) for n in (
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+        "169.254.0.0/16", "0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24",
+        "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+        "::1/128", "fc00::/7", "fe80::/10",
+    )
+]
 
 MAX_FETCH_BYTES = 200_000
 USER_AGENT = "self-hosted-assistant/0.1 (personal project)"
@@ -131,38 +141,70 @@ def _unwrap(href: str) -> str:
     return href
 
 
-def _fetch_url(url: str) -> dict[str, Any]:
-    """Allowlisted hosts, port 443 only, no redirects, capped response.
+def _resolve_public(host: str) -> None:
+    """Refuse anything that resolves into a private range.
 
-    The host check alone was not enough: an allowlisted hostname on an
-    arbitrary port (https://en.wikipedia.org:22/) passed and attempted the
-    connection. Redirects stay off so an allowlisted host cannot forward the
-    fetch to somewhere internal.
+    Checked after DNS rather than by name, so a public hostname pointed at
+    192.168.1.1 is caught. This is the rule that keeps a compromised model
+    off the home network.
     """
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ToolError(f"cannot resolve {host}") from exc
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if any(addr in net for net in BLOCKED_NETS) or not addr.is_global:
+            raise ToolError(f"{host} resolves to a private address")
+
+
+def _fetch_url(url: str) -> dict[str, Any]:
     from urllib.parse import urlparse
 
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise ToolError("https only")
     host = (parsed.hostname or "").lower().rstrip(".")
-    if host not in FETCH_ALLOWLIST:
-        raise ToolError(f"domain not allowed: {host}")
+    if not host:
+        raise ToolError("no hostname in that URL")
     if parsed.port not in (None, 443):
         raise ToolError("port 443 only")
+    _resolve_public(host)
 
     try:
-        resp = httpx.get(url, timeout=10.0, follow_redirects=False,
-                         headers={"User-Agent": USER_AGENT})
+        resp = httpx.get(url, timeout=15.0, follow_redirects=False,
+                         headers={"User-Agent": BROWSER_UA})
     except httpx.RequestError as exc:
         raise ToolError(f"could not reach it: {type(exc).__name__}") from exc
     if resp.is_redirect:
-        raise ToolError("that page redirects, which is not followed")
+        location = resp.headers.get("location", "")
+        raise ToolError(f"it redirects to {location[:120]}, try that URL")
     if resp.status_code >= 400:
         raise ToolError(f"the page returned {resp.status_code}")
-    if "html" not in resp.headers.get("content-type", "") and \
-       "text" not in resp.headers.get("content-type", ""):
-        raise ToolError("not a text page")
-    return {"url": url, "content": resp.text[:MAX_FETCH_BYTES]}
+    kind = resp.headers.get("content-type", "")
+    if "html" not in kind and "text" not in kind and "json" not in kind:
+        raise ToolError(f"not a text page, it is {kind.split(';')[0]}")
+
+    text = resp.text[:MAX_FETCH_BYTES]
+    if "html" in kind:
+        text = _readable(text)
+    return {"url": url, "title": _page_title(resp.text), "content": text[:20000]}
+
+
+_SCRIPTS = re.compile(r"<(script|style|nav|footer|svg)\b.*?</\1>", re.S | re.I)
+_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+
+
+def _page_title(html: str) -> str:
+    found = _TITLE.search(html)
+    return _untag(found.group(1))[:150] if found else ""
+
+
+def _readable(html: str) -> str:
+    """Strip markup to text. Enough for the model to read a page."""
+    body = _SCRIPTS.sub(" ", html)
+    body = re.sub(r"<(br|/p|/div|/h[1-6]|/li)\s*/?>", "\n", body, flags=re.I)
+    return re.sub(r"\n{3,}", "\n\n", _untag(body))
 
 
 class Tool:
@@ -321,9 +363,10 @@ WEB_TOOLS: dict[str, Tool] = {
                  "description": "Search keywords, not a full sentence."}},
                   ["query"]), _web_search),
         Tool("read_url",
-             "Fetch the text of a specific web page. Use only when the user "
-             "gives a URL or a search result needs reading in full. Only "
-             "allowlisted domains work. Do not guess URLs.",
+             "Open a web page and read its text. You CAN open any public "
+             "https URL, so never say you are unable to open websites. Use "
+             "when the user gives a link or names a site, or to read a search "
+             "result in full. Do not guess at URLs that may not exist.",
              _obj({"url": {"type": "string",
                            "description": "Full https URL."}},
                   ["url"]), _fetch_url),
