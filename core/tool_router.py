@@ -69,12 +69,39 @@ TRIGGERS = {
                      "my name is i prefer i work with",
 }
 
+# A question ABOUT a thing is not a request to DO the thing. "explain what
+# github is" scored read_repo because it shares vocabulary with the trigger,
+# which is the adversarial tier the bench measures.
+EXPLAIN = re.compile(
+    r"^\s*(what|why|how)\s+(is|are|was|were|do|does|did|come|come s)\b"
+    r"|^\s*(explain|describe|define|tell me about|what'?s the difference)\b"
+    r"|\bwhat does \w+ mean\b|\bhow do(es)? \w+ work\b", re.I)
+
+# Beats EXPLAIN: real requests that happen to be phrased as questions.
+# Recall about this conversation is the big one, "what did I say earlier"
+# parses as a question but is a genuine lookup.
+DO_ANYWAY = re.compile(
+    r"\d\s*[-+*/^%]\s*\d|\bhttps?://|\d+\s*(percent|%)\b"
+    r"|\bwhat (day|date|time|year) is\b|\bwhat'?s the (date|time)\b"
+    r"|\bhow (many|much) .*\b(in|to)\s+\w+$"
+    r"|\b(i|we|you) (said|told|mentioned|asked|decided|agreed)\b"
+    r"|\bdid i (say|mention|tell)\b|\bearlier\b|\blast time\b"
+    r"|\bwe (discussed|talked about)\b", re.I)
+
 _WORD = re.compile(r"[a-z0-9]+")
 
 # Lexical scoring cannot see that "4871 * 392" is arithmetic: the symbols are
 # stripped and bare digits match nothing. These fire on shape, not vocabulary.
 PATTERNS = [
-    (re.compile(r"\d\s*[-+*/^%]\s*\d|\d+\s*(times|plus|minus|divided)"), "calculate"),
+    # Arithmetic in words, not symbols: "two thirds of 900", "split 847
+    # between 3", "add up 45, 89 and 203".
+    (re.compile(r"\d\s*[-+*/^%]\s*\d|\d+\s*(times|plus|minus|divided)"
+                r"|\b(half|third|thirds|quarter|quarters|double|triple)\b.*\d"
+                r"|\b(split|divide|share|add up|sum|total|average)\b.*\d"
+                r"|\d.*\b(between|among)\b.*\d"), "calculate"),
+    # Elliptical unit reference: "whats that in metric", "in celsius".
+    (re.compile(r"\bin (metric|imperial|celsius|fahrenheit|kilos|pounds|"
+                r"km|miles|inches|feet|litres|liters|gallons)\b"), "convert_units"),
     (re.compile(r"https?://"), "read_url"),
     (re.compile(r"\b[\w.-]+/[\w.-]+\b(?!\s*(=|\d))"), "read_repo"),
     (re.compile(r"\d+\s*(kg|lb|lbs|km|mi|miles|cm|ft|in|c|f|gb|mb|kb|ml|l|oz)\b"),
@@ -155,8 +182,23 @@ class ToolRouter:
     def select(self, message: str, registry: dict) -> tuple[dict, list[str]]:
         """Return the tools to offer, plus the ranking for telemetry."""
         ranked = self.score(message)
-        chosen = {n for n, s in ranked[:self.top_k] if s > 0}
         lowered = message.lower()
+        explaining = bool(EXPLAIN.search(message)) and not DO_ANYWAY.search(message)
+
+        hits = [(n, sc) for n, sc in ranked if sc > 0]
+        if hits and not explaining:
+            # Only offer runners up that are close to the leader. A weak second
+            # place is noise, and noise is what the model wrongly reaches for.
+            best = hits[0][1]
+            chosen = {n for n, sc in hits[:self.top_k] if sc >= best * 0.35}
+        elif explaining:
+            # Scores are normalised to the leader, so a dominance test always
+            # passes and tells us nothing. A question about a thing needs no
+            # specialist tool: search alone can answer it.
+            chosen = set()
+        else:
+            chosen = set()
+
         chosen |= {name for pattern, name in PATTERNS
                    if name in registry and pattern.search(lowered)}
         chosen |= ALWAYS & set(registry)
