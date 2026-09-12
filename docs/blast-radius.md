@@ -42,9 +42,12 @@ Grep for `subprocess`, `os.system`, `eval(`, `exec(` and `__import__` across
 
 ## Why the network is contained
 
-`read_url` requires https and an allowlisted hostname. That blocks `file://`,
-cloud metadata endpoints, localhost and the private ranges in one rule, since
-none of them are on the list. The container also has no route to the LAN, and
+`read_url` opens any public https URL, and refuses by **resolved address**
+rather than by name: DNS is resolved first and anything in a private,
+loopback, link local or reserved range is rejected. That is stronger than the
+allowlist it replaced, because it also catches a public hostname deliberately
+pointed at an internal IP, which a name list cannot see. Port 443 only,
+redirects refused, response size capped. The container also has no route to the LAN, and
 the llama container has no internet at all.
 
 ## Cross-session access, the hole that was real
