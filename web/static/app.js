@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 const log = $("log"), hello = $("hello"), scroll = $("scroll");
 const input = $("q"), send = $("send"), who = $("who");
 
-let session = null, me = null, busy = false;
+let session = null, me = null, busy = false, attachment = null;
 
 const at = () => scroll.scrollTo(0, scroll.scrollHeight);
 
@@ -113,6 +113,39 @@ function telemetry(node, t) {
   node.append(d);
 }
 
+$("file").onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const box = $("attached");
+  box.hidden = false;
+  box.innerHTML = `reading <b>${escape_(f.name)}</b>`;
+  const body = new FormData();
+  body.append("file", f);
+  const res = await fetch("/api/upload", { method: "POST", body });
+  const d = await res.json();
+  if (!res.ok) {
+    box.innerHTML = `<b>${escape_(d.detail || "could not read that file")}</b>`;
+    attachment = null;
+  } else {
+    attachment = d.id;
+    const size = d.pages ? `${d.pages} pages` : `${(d.chars / 1000).toFixed(1)}k chars`;
+    box.innerHTML = `<b>${escape_(d.name)}</b> ${size}${d.truncated ? ", truncated" : ""}`;
+    const x = document.createElement("button");
+    x.textContent = "remove";
+    x.onclick = clearAttachment;
+    box.append(x);
+    input.focus();
+  }
+  e.target.value = "";
+};
+
+function clearAttachment() {
+  attachment = null;
+  $("attached").hidden = true;
+  $("attached").innerHTML = "";
+  $("file").value = "";
+}
+
 $("f").onsubmit = async e => {
   e.preventDefault();
   const text = input.value.trim();
@@ -121,14 +154,16 @@ $("f").onsubmit = async e => {
   busy = true;
   send.disabled = true;
   hello.innerHTML = "";
-  add("user", text);
+  const label = attachment ? $("attached").querySelector("b").textContent : null;
+  add("user", label ? `[${label}] ${text}` : text);
+  clearAttachment();
   const node = add("bot", "");
 
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ session, message: text }),
+      body: JSON.stringify({ session, message: text, attachment }),
     });
     if (!res.ok) {
       node.textContent = res.status === 503

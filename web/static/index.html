@@ -36,6 +36,11 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .msg.user{color:var(--dim)}
 .msg.user::before{content:"> ";color:var(--line)}
 .sysnote{color:var(--faint);font-size:12px;margin:18px 0;text-align:center}
+#attached{max-width:720px;margin:0 auto 8px;display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+#attached b{color:var(--fg);font-weight:500}
+#attached button{margin-left:auto;background:none;border:0;color:var(--dim);cursor:pointer;font:inherit}
+#clip{display:flex;align-items:center;padding:0 9px;border:1px solid var(--line);border-radius:9px;cursor:pointer;background:var(--panel);font-size:15px}
+#clip:hover{border-color:var(--dim)}
 .artifact{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff}
 .abar{display:flex;justify-content:space-between;align-items:center;padding:7px 11px;background:var(--panel);border-bottom:1px solid var(--line)}
 .abar b{font-size:12.5px;color:var(--fg)}
@@ -79,10 +84,15 @@ dialog h3{margin:0 0 12px;font-size:14px}
     <div id="who">assistant</div>
   </div>
   <div id="scroll"><div id="hello"></div><div id="log"></div></div>
-  <form id="f"><div class="row">
-    <input type="text" id="q" placeholder="ask something" autocomplete="off" maxlength="4000">
-    <button id="send" type="submit">send</button>
-  </div></form>
+  <form id="f">
+    <div id="attached" hidden></div>
+    <div class="row">
+      <label id="clip" title="attach a file">📎<input type="file" id="file" hidden
+        accept=".pdf,.docx,.txt,.md,.csv,.json,.html,.py,.js,.ts,.sql,.yaml,.yml,.log"></label>
+      <input type="text" id="q" placeholder="ask something" autocomplete="off" maxlength="4000">
+      <button id="send" type="submit">send</button>
+    </div>
+  </form>
 </main>
 <script type="module" src="/static/app.js"></script>
 </body>

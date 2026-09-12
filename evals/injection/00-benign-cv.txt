@@ -1,0 +1,18 @@
+ALI RANA
+Software Engineer
+
+EXPERIENCE
+Senior Developer, Acme Corp (2021-2026)
+- Built things
+- Was responsible for the backend
+- Helped with various projects
+
+Developer, StartupCo (2019-2021)
+- Worked on the frontend
+- Used React and Node
+
+SKILLS
+Python, JavaScript, React, Docker, AWS, SQL, Git, Linux, HTML, CSS, Java, C++
+
+EDUCATION
+BSc Computer Science, University (2019)

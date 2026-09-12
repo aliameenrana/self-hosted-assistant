@@ -53,7 +53,9 @@ a perfect command is inert text.
 - Every real control below is a *capability* control.
 
 **What we DO restrict at input, because it's enforceable:**
-- Text only. No file uploads. No images. No audio.
+- Text, PDF, DOCX and plain text files only. No images, no audio, no archives.
+- Uploads are parsed in memory and never written to disk.
+- Size, page and character caps on every document.
 - No user-supplied URLs fetched. Ever. (Allowlist only.)
 - Length caps, rate limits, Turnstile.
 
@@ -223,3 +225,45 @@ blast radius entirely, and the architecture already supports it — the app
 talks to `LLM_BASE_URL` and does not care where the GPU lives.
 
 Keeping that path open is why the model host is swappable.
+
+
+---
+
+## Uploaded Documents
+
+Added after the text-only rule above, and it is the largest untrusted input in
+the system. Two separate risks.
+
+### Parser safety
+
+PDF and Office parsers have a long history of memory-safety bugs. Mitigations:
+pure-Python parsers only (pypdf, python-docx), 8MB and 40-page caps, bytes held
+in memory and never written to disk, encrypted PDFs rejected, and extraction
+failures returned as errors rather than retried.
+
+### Injection through document content
+
+**The first implementation was defeated immediately.** A fenced block with one
+warning above it lost to a plain "ignore all previous instructions" and the
+model replied with only the attacker's chosen word.
+
+The attack that held out longest forged Qwen's own chat template delimiters
+(`<|im_start|>system`), so the model saw a real role boundary rather than text.
+
+Three changes together, none sufficient alone:
+
+1. **Warnings bracket the document.** One warning before the content is not
+   enough. The position immediately before generation is the best attended, so
+   the rule is repeated after the document as well.
+2. **Documents go in their own system message**, never inside the user turn,
+   so the user's actual request stays last.
+3. **Role delimiters and override phrases are defanged** with zero-width
+   joiners. The text still reads normally but no longer parses as structure.
+
+Tests live in `evals/injection/`. Run them before any release and after any
+change to prompts or `core/documents.py`.
+
+**This is mitigation, not a boundary.** Prompt injection has no complete
+defence. The actual boundary remains capability removal: tools cannot write
+files, execute commands, or reach arbitrary networks, so an injection that
+succeeds still has nothing worth doing.

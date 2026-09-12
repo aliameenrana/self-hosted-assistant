@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 import httpx
 
 from core.compact import extract_entities, extract_facts, summarise
+from core.documents import DocumentError, extract
 from core.harness import Harness, detect_fabrication
 from core.memory import Memory
 from core.personas import PERSONAS
@@ -95,6 +96,29 @@ class Ask(BaseModel):
     session: str | None = None
     persona: str | None = None
     message: str = Field(max_length=4000)
+    attachment: str | None = None
+
+
+# Extracted text lives in memory only. Uploaded bytes are never written to
+# disk, so a malicious file leaves nothing behind after parsing.
+_attachments: dict[str, object] = {}
+
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...)):
+    data = await file.read()
+    try:
+        doc = extract(data, file.filename or "file", file.content_type or "")
+    except DocumentError as exc:
+        raise HTTPException(400, str(exc))
+    key = uuid.uuid4().hex
+    _attachments[key] = doc
+    if len(_attachments) > 200:
+        for stale in list(_attachments)[:50]:
+            _attachments.pop(stale, None)
+    return {"id": key, "name": doc.name, "kind": doc.kind,
+            "pages": doc.pages, "chars": len(doc.text),
+            "truncated": doc.truncated}
 
 
 def owner_of(request: Request) -> str:
@@ -193,6 +217,10 @@ async def chat(ask: Ask, request: Request):
 
     ctx = memory.load(session, owner)
     history = ctx.as_messages()
+    doc = _attachments.pop(ask.attachment, None) if ask.attachment else None
+    if doc:
+        history = history + [{"role": "system", "content": doc.as_context()}]
+    question = ask.message
     if switched_from:
         history.append({"role": "system", "content":
             f"You just took over this conversation from {PERSONAS[switched_from].name}. "
@@ -209,7 +237,7 @@ async def chat(ask: Ask, request: Request):
                 yield _sse({"type": "start", "session": session,
                             "persona": persona, "switched_from": switched_from})
                 text = ""
-                async for ev in harness.answer(ask.message, persona,
+                async for ev in harness.answer(question, persona,
                                                history=history):
                     if ev["type"] == "token":
                         text += ev["text"]
@@ -217,7 +245,9 @@ async def chat(ask: Ask, request: Request):
                     else:
                         tel = ev["telemetry"]
                         flags = detect_fabrication(text, tel)
-                        memory.add_turn(session, "user", ask.message)
+                        stored = (f"[attached {doc.name}] {ask.message}"
+                                  if doc else ask.message)
+                        memory.add_turn(session, "user", stored)
                         memory.add_turn(session, "assistant", text)
                         _persist(session, ask.message, text, tel)
                         yield _sse({"type": "done", "telemetry": {
