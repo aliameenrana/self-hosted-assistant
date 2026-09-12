@@ -21,6 +21,31 @@ class ToolCall:
     ms: int = 0
 
 
+REPAIR = {
+    "malformed": "Your arguments were not valid JSON. Call it again with "
+                 "correctly formed JSON arguments.",
+    "unknown_tool": "That tool does not exist. Pick one from the list, or "
+                    "answer without a tool.",
+    "bad_args": "The arguments were rejected. Read the error, fix them, and "
+                "call it once more.",
+    "tool_error": "The tool itself failed. Do not repeat the same call. Try a "
+                  "different tool or answer without one.",
+    "empty": "That returned nothing useful. A different query might work, or "
+             "answer from your own knowledge and say the lookup came back empty.",
+}
+
+
+def _is_empty(result: Any) -> bool:
+    """Structurally valid but semantically useless. Agents over-trust these."""
+    if result is None:
+        return True
+    if isinstance(result, dict):
+        meaningful = [v for k, v in result.items()
+                      if k not in ("query", "url", "expression")]
+        return not any(v not in (None, "", [], {}, 0) for v in meaningful)
+    return result in ("", [], {})
+
+
 @dataclass
 class Telemetry:
     model: str = ""
@@ -69,6 +94,7 @@ class Harness:
                     {"role": "user", "content": question}]
         schemas = [t.schema() for t in self.registry.values()]
         last_signature = None
+        attempts: dict[str, int] = {}
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
@@ -90,46 +116,63 @@ class Harness:
                     return messages
                 last_signature = signature
 
-                record = await self._run_tool(call, messages, tel)
+                record = await self._run_tool(call, tel)
+                payload = dict(record)
+                failure = payload.pop("failure", None)
+                if failure:
+                    payload["next_step"] = REPAIR[failure]
+                    attempts[name] = attempts.get(name, 0) + 1
+                    if attempts[name] > self.max_retries:
+                        payload["next_step"] = (
+                            f"{name} has failed {attempts[name]} times. Stop calling "
+                            "it. Answer without it and say plainly that it failed.")
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
                                  "name": name,
-                                 "content": json.dumps(record, default=str)[:8000]})
+                                 "content": json.dumps(payload, default=str)[:8000]})
         return messages
 
-    async def _run_tool(self, call: dict, messages: list[dict],
-                        tel: Telemetry) -> dict:
+    async def _run_tool(self, call: dict, tel: Telemetry) -> dict:
+        """Execute once and classify. Recovery is the caller's job, because a
+        retry that resends identical arguments produces an identical failure.
+        """
         fn = call["function"]
         name = fn["name"]
         started = time.monotonic()
-        for attempt in range(self.max_retries + 1):
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError as exc:
-                if attempt < self.max_retries:
-                    continue
-                rec = ToolCall(name, {}, "malformed", error=f"bad JSON: {exc}",
-                               retries=attempt)
-                tel.tool_calls.append(rec)
-                return {"error": rec.error}
-            try:
-                result = execute(self.registry, name, args)
-                rec = ToolCall(name, args, "ok", result=result, retries=attempt,
-                               ms=int((time.monotonic() - started) * 1000))
-                tel.tool_calls.append(rec)
-                return {"result": result}
-            except ToolError as exc:
-                if attempt < self.max_retries:
-                    continue
-                rec = ToolCall(name, args, "error", error=str(exc), retries=attempt,
-                               ms=int((time.monotonic() - started) * 1000))
-                tel.tool_calls.append(rec)
-                return {"error": str(exc)}
-            except Exception as exc:
-                rec = ToolCall(name, args, "error", error=f"{type(exc).__name__}",
-                               retries=attempt)
-                tel.tool_calls.append(rec)
-                return {"error": "tool failed"}
-        return {"error": "exhausted retries"}
+        elapsed = lambda: int((time.monotonic() - started) * 1000)
+
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except json.JSONDecodeError as exc:
+            tel.tool_calls.append(ToolCall(name, {}, "malformed",
+                                           error=f"arguments were not valid JSON: {exc}"))
+            return {"failure": "malformed", "error": f"invalid JSON: {exc}"}
+
+        if name not in self.registry:
+            tel.tool_calls.append(ToolCall(name, args, "unknown_tool",
+                                           error=f"no such tool: {name}"))
+            return {"failure": "unknown_tool",
+                    "error": f"no tool named {name}. Available: {sorted(self.registry)}"}
+
+        try:
+            result = execute(self.registry, name, args)
+        except ToolError as exc:
+            tel.tool_calls.append(ToolCall(name, args, "bad_args", error=str(exc),
+                                           ms=elapsed()))
+            return {"failure": "bad_args", "error": str(exc)}
+        except Exception as exc:
+            tel.tool_calls.append(ToolCall(name, args, "tool_error",
+                                           error=type(exc).__name__, ms=elapsed()))
+            return {"failure": "tool_error",
+                    "error": f"{name} failed: {type(exc).__name__}"}
+
+        if _is_empty(result):
+            tel.tool_calls.append(ToolCall(name, args, "empty", result=result,
+                                           ms=elapsed()))
+            return {"failure": "empty", "result": result,
+                    "error": f"{name} returned nothing useful"}
+
+        tel.tool_calls.append(ToolCall(name, args, "ok", result=result, ms=elapsed()))
+        return {"result": result}
 
     async def answer(self, question: str, persona: str,
                      history: list[dict] | None = None) -> AsyncIterator[dict]:
