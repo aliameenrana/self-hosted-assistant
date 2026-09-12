@@ -13,9 +13,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import httpx
+
+from core.compact import extract_entities, extract_facts, summarise
 from core.harness import Harness, detect_fabrication
+from core.memory import Memory
 from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
+from web import auth
 
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
 QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
@@ -30,6 +35,7 @@ harness = Harness(
 
 _slots = asyncio.Semaphore(SLOTS)
 _waiting = 0
+memory = Memory(lambda: db())
 
 
 def db() -> sqlite3.Connection:
@@ -44,7 +50,8 @@ async def lifespan(app: FastAPI):
     with db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS sessions(
-          id TEXT PRIMARY KEY, persona TEXT, created REAL);
+          id TEXT PRIMARY KEY, persona TEXT, created REAL,
+          owner TEXT DEFAULT 'anon', title TEXT);
         CREATE TABLE IF NOT EXISTS messages(
           id INTEGER PRIMARY KEY, session TEXT, role TEXT, content TEXT,
           ttft_ms INT, total_ms INT, created REAL);
@@ -52,16 +59,88 @@ async def lifespan(app: FastAPI):
           id INTEGER PRIMARY KEY, session TEXT, name TEXT, outcome TEXT,
           retries INT, ms INT, created REAL);
         """)
+        # Sessions predate owner/title. CREATE TABLE IF NOT EXISTS skips an
+        # existing table, so add the columns explicitly.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN owner TEXT DEFAULT 'anon'")
+        if "title" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
+    memory.init()
     yield
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(auth.router)
+
+
+@app.middleware("http")
+async def ensure_uid(request: Request, call_next):
+    response = await call_next(request)
+    migrate = getattr(request.state, "migrate", None)
+    if migrate:
+        old, new = migrate
+        if old and old != "anon" and old != new:
+            with db() as conn:
+                conn.execute("UPDATE sessions SET owner=? WHERE owner=?", (new, old))
+                conn.execute("UPDATE facts SET owner=? WHERE owner=?", (new, old))
+    if not request.cookies.get("uid"):
+        response.set_cookie("uid", "a:" + uuid.uuid4().hex, max_age=31_536_000,
+                            httponly=True, samesite="lax")
+    return response
 
 
 class Ask(BaseModel):
     session: str | None = None
     persona: str | None = None
     message: str = Field(max_length=4000)
+
+
+def owner_of(request: Request) -> str:
+    return request.cookies.get("uid") or "anon"
+
+
+@app.get("/api/session/{session}")
+def session_detail(session: str):
+    with db() as conn:
+        row = conn.execute("SELECT persona FROM sessions WHERE id=?",
+                           (session,)).fetchone()
+        turns = conn.execute(
+            "SELECT role, content FROM turns WHERE session=? ORDER BY id",
+            (session,)).fetchall()
+    if not row:
+        raise HTTPException(404, "no such session")
+    return {"persona": row["persona"],
+            "messages": [dict(t) for t in turns]}
+
+
+@app.get("/api/history")
+def history(request: Request):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT s.id, s.persona, s.title, s.created,"
+            " (SELECT COUNT(*) FROM turns t WHERE t.session=s.id) n"
+            " FROM sessions s WHERE s.owner=? ORDER BY s.created DESC LIMIT 40",
+            (owner_of(request),)).fetchall()
+    return [dict(r) for r in rows if r["n"]]
+
+
+@app.post("/api/forget")
+def forget(request: Request):
+    memory.forget(owner_of(request))
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(request: Request):
+    owner = owner_of(request)
+    with db() as conn:
+        facts = conn.execute("SELECT fact FROM facts WHERE owner=?",
+                             (owner,)).fetchall()
+    return {"owner": owner, "signed_in": owner.startswith("g:"),
+            "email": request.cookies.get("email", ""),
+            "google_available": auth.enabled(),
+            "facts": [f["fact"] for f in facts]}
 
 
 @app.get("/api/personas")
@@ -83,22 +162,40 @@ def stats():
 
 
 @app.post("/api/chat")
-async def chat(ask: Ask):
+async def chat(ask: Ask, request: Request):
     global _waiting
     if _waiting >= QUEUE_CAP:
         raise HTTPException(503, "queue full, try in a minute")
 
+    owner = owner_of(request)
     session = ask.session or uuid.uuid4().hex
-    persona = ask.persona
+    switched_from = None
+
     with db() as conn:
         row = conn.execute("SELECT persona FROM sessions WHERE id=?",
                            (session,)).fetchone()
         if row:
             persona = row["persona"]
+            # Switching mid-conversation keeps the context. The new persona
+            # inherits the thread and knows who it took over from.
+            if ask.persona and ask.persona in PERSONAS and ask.persona != persona:
+                switched_from, persona = persona, ask.persona
+                conn.execute("UPDATE sessions SET persona=? WHERE id=?",
+                             (persona, session))
         else:
-            persona = persona if persona in PERSONAS else random.choice(list(PERSONAS))
-            conn.execute("INSERT INTO sessions VALUES(?,?,?)",
-                         (session, persona, time.time()))
+            persona = ask.persona if ask.persona in PERSONAS else random.choice(
+                list(PERSONAS))
+            conn.execute(
+                "INSERT INTO sessions(id,persona,created,owner,title)"
+                " VALUES(?,?,?,?,?)",
+                (session, persona, time.time(), owner, ask.message[:60]))
+
+    ctx = memory.load(session, owner)
+    history = ctx.as_messages()
+    if switched_from:
+        history.append({"role": "system", "content":
+            f"You just took over this conversation from {PERSONAS[switched_from].name}. "
+            f"You may acknowledge that once, briefly, in your own voice."})
 
     async def events():
         global _waiting
@@ -108,29 +205,64 @@ async def chat(ask: Ask):
             if position > SLOTS:
                 yield _sse({"type": "queued", "position": position - SLOTS})
             async with _slots:
-                yield _sse({"type": "start", "session": session, "persona": persona})
+                yield _sse({"type": "start", "session": session,
+                            "persona": persona, "switched_from": switched_from})
                 text = ""
-                async for ev in harness.answer(ask.message, persona):
+                async for ev in harness.answer(ask.message, persona,
+                                               history=history):
                     if ev["type"] == "token":
                         text += ev["text"]
                         yield _sse(ev)
                     else:
                         tel = ev["telemetry"]
                         flags = detect_fabrication(text, tel)
+                        memory.add_turn(session, "user", ask.message)
+                        memory.add_turn(session, "assistant", text)
                         _persist(session, ask.message, text, tel)
                         yield _sse({"type": "done", "telemetry": {
                             "model": tel.model, "ttft_ms": tel.ttft_ms,
                             "total_ms": tel.total_ms, "turns": tel.turns,
                             "flags": flags,
+                            "context": {"recent": len(ctx.recent),
+                                        "entities": len(ctx.entities),
+                                        "facts": len(ctx.long),
+                                        "summary": bool(ctx.short)},
                             "tools": [{"name": c.name, "outcome": c.outcome,
                                        "retries": c.retries, "ms": c.ms}
                                       for c in tel.tool_calls]}})
+                        asyncio.create_task(_maintain(session, owner))
         except Exception:
             yield _sse({"type": "error", "message": "something broke on my end"})
         finally:
             _waiting -= 1
 
     return StreamingResponse(events(), media_type="text/event-stream")
+
+
+async def _maintain(session: str, owner: str) -> None:
+    """Compaction and fact extraction, after the reply has been sent."""
+    try:
+        pending = memory.pending(session)
+        async with httpx.AsyncClient() as client:
+            base, model = harness.base_url, harness.model
+            if pending:
+                ctx = memory.load(session, owner)
+                summary = await summarise(client, base, model, pending, ctx.short)
+                entities = await extract_entities(client, base, model, pending)
+                if summary:
+                    memory.apply_compaction(session, [t["id"] for t in pending],
+                                            summary, entities)
+            with db() as conn:
+                n = conn.execute("SELECT COUNT(*) c FROM turns WHERE session=?",
+                                 (session,)).fetchone()["c"]
+            if n and n % 6 == 0:
+                recent = memory.load(session, owner).recent
+                user_only = [t for t in recent if t["role"] == "user"]
+                if user_only:
+                    facts = await extract_facts(client, base, model, user_only)
+                    memory.remember(owner, facts, session)
+    except Exception:
+        pass  # maintenance is best-effort; never breaks a reply
 
 
 def _sse(obj: dict) -> str:
