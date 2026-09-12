@@ -207,12 +207,23 @@ def _readable(html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", _untag(body))
 
 
+# Tools where the query and result are comparable text, so a zero-overlap
+# check is meaningful. Not calculate/datetime/convert_units, whose output is
+# a number the query text would never restate.
+RELEVANCE_CHECKED = {"search_web", "read_url", "read_repo"}
+
+
 class Tool:
-    def __init__(self, name: str, description: str, params: dict, fn: Callable):
+    def __init__(self, name: str, description: str, params: dict, fn: Callable,
+                 budget: int = 64):
         self.name = name
         self.description = description
         self.params = params
         self.fn = fn
+        # Tokens pass 1 needs to emit the call. Tools whose arguments carry
+        # content need far more; 64 truncates them mid-JSON and the failure is
+        # then misdiagnosed as the model producing invalid JSON.
+        self.budget = budget
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -379,7 +390,7 @@ WEB_TOOLS: dict[str, Tool] = {
                    "fields": {"type": "string",
                               "description": "Comma separated, e.g. "
                                              "name,email,years_experience"}},
-                  ["text", "fields"]), _extract_structured),
+                  ["text", "fields"]), _extract_structured, budget=2400),
         Tool("diff_text",
              "Compare two blocks of text and show what changed, with counts "
              "and a similarity score. Use when asked what changed between two "
@@ -387,7 +398,7 @@ WEB_TOOLS: dict[str, Tool] = {
              "compare meaning or to review a single document.",
              _obj({"before": {"type": "string", "description": "Original text."},
                    "after": {"type": "string", "description": "Revised text."}},
-                  ["before", "after"]), _diff_text),
+                  ["before", "after"]), _diff_text, budget=2400),
         Tool("convert_units",
              "Convert between units of length, mass, volume, time, data size, "
              "speed or temperature. Use whenever a value needs expressing in "
@@ -417,7 +428,7 @@ WEB_TOOLS: dict[str, Tool] = {
                    "html": {"type": "string",
                             "description": "Complete HTML document with inline "
                                            "<style>. No external files."}},
-                  ["title", "html"]), _create_webpage),
+                  ["title", "html"]), _create_webpage, budget=3000),
     ]
 }
 

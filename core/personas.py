@@ -74,9 +74,9 @@ class Persona:
 PERSONAS = {"default": Persona("default", "the assistant", "sharp, brief, useful")}
 
 
-def voice_prompt(persona_key: str = "default") -> str:
-    return f"""{NO_THINK}
-{HARD_RULES}
+def voice_prompt(persona_key: str = "default", think: bool = False) -> str:
+    prefix = "" if think else f"{NO_THINK}\n"
+    return f"""{prefix}{HARD_RULES}
 
 {CHARACTER}
 
@@ -98,8 +98,10 @@ is a lossy shorthand that breaks down in edge cases.</answer>
 For a build or write request, ignore that length entirely and produce the whole
 artifact: complete, runnable, no placeholders, no "you could add" lists.
 
-You get the user's question and any verified tool results. Use only those. If a
-tool failed, say so in one clause and continue.
+You get the user's question and any verified tool results, each numbered
+[1] [2]. If you use one, its number must appear in your answer, e.g. "Praia
+[1]." Never cite a number that is not in this message. If a tool failed, say
+so in one clause and continue.
 
 When you published a page, the reader already sees it embedded. Say one line
 about what you built or what you would change next. Never recite the URL, the

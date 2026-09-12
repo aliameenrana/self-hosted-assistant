@@ -9,7 +9,7 @@ import httpx
 from .personas import (PERSONAS, STOP, TOOL_PROMPT, VOICE_MAX_TOKENS,
                        voice_prompt)
 from .tools import ToolError
-from .tools.registry import Tool, execute
+from .tools.registry import RELEVANCE_CHECKED, Tool, execute
 
 
 @dataclass
@@ -55,6 +55,8 @@ def strip_em_dashes(text: str) -> str:
 REPAIR = {
     "malformed": "Your arguments were not valid JSON. Call it again with "
                  "correctly formed JSON arguments.",
+    "truncated": "Your arguments were cut off before they finished. Call it "
+                 "again with shorter content.",
     "unknown_tool": "That tool does not exist. Pick one from the list, or "
                     "answer without a tool.",
     "bad_args": "The arguments were rejected. Read the error, fix them, and "
@@ -64,6 +66,26 @@ REPAIR = {
     "empty": "That returned nothing useful. A different query might work, or "
              "answer from your own knowledge and say the lookup came back empty.",
 }
+
+
+_STOP = {"the","a","an","is","are","was","for","of","and","in","on","to",
+        "search","find","term","what","how","do","you","can"}
+
+
+def _relevance(query: str, result: Any) -> float:
+    """Zero model calls. Word overlap between the query and the result text.
+
+    A result can be well formed and still not answer the question, which is
+    the case a status code cannot catch. "search zzqqx nonexistent" that comes
+    back with an unrelated game is syntactically fine and semantically noise.
+    """
+    q = {w for w in re.findall(r"[a-z0-9]+", query.lower()) if w not in _STOP
+        and len(w) > 2}
+    if not q:
+        return 1.0
+    text = json.dumps(result, default=str).lower()
+    hit = sum(1 for w in q if w in text)
+    return hit / len(q)
 
 
 def _is_empty(result: Any) -> bool:
@@ -97,16 +119,15 @@ class Telemetry:
 class Harness:
     def __init__(self, base_url: str, model: str, registry: dict[str, Tool],
                  max_turns: int = 6, max_retries: int = 2,
-                 decide_tokens: int = 64, content_tokens: int = 2600):
+                 decide_tokens: int = 64):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.registry = registry
         self.max_turns = max_turns
         self.max_retries = max_retries
         self.decide_tokens = decide_tokens
-        self.content_tokens = content_tokens
-        self.bulky = {"create_webpage"}
         self.router = None
+
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
                     tools: list[dict] | None = None, stream: bool = False,
@@ -140,14 +161,15 @@ class Harness:
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
-            budget = (self.content_tokens
-                      if self.bulky & set(offered)
-                      else self.decide_tokens)
+            budget = max([t.budget for t in offered.values()] or
+                          [self.decide_tokens])
             data = await self._chat(client, messages, tools=schemas,
                                     max_tokens=budget)
             msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             said = (msg.get("content") or "").strip()
+            if data["choices"][0].get("finish_reason") == "length" and not calls:
+                tel.trace.append(f"turn {turn + 1}: hit the {budget} token cap")
             if not calls:
                 # Omission is the dominant failure for models this size: it
                 # answers in prose while holding the tool. Force the call once
@@ -215,9 +237,13 @@ class Harness:
         try:
             args = json.loads(fn.get("arguments") or "{}")
         except json.JSONDecodeError as exc:
-            tel.tool_calls.append(ToolCall(name, {}, "malformed",
-                                           error=f"arguments were not valid JSON: {exc}"))
-            return {"failure": "malformed", "error": f"invalid JSON: {exc}"}
+            raw = fn.get("arguments") or ""
+            # Unterminated string means the budget cut it off, not that the
+            # model emitted bad JSON. Different cause, different repair.
+            cut = raw.count('"') % 2 == 1 or not raw.rstrip().endswith("}")
+            kind = "truncated" if cut else "malformed"
+            tel.tool_calls.append(ToolCall(name, {}, kind, error=str(exc)))
+            return {"failure": kind, "error": str(exc)}
 
         if name not in self.registry:
             tel.tool_calls.append(ToolCall(name, args, "unknown_tool",
@@ -242,6 +268,16 @@ class Harness:
                                            ms=elapsed()))
             return {"failure": "empty", "result": result,
                     "error": f"{name} returned nothing useful"}
+
+        if name in RELEVANCE_CHECKED:
+            query_text = next(iter(args.values()), "") if args else ""
+            score = _relevance(str(query_text), result)
+            if score == 0:
+                tel.tool_calls.append(ToolCall(name, args, "irrelevant",
+                                               result=result, ms=elapsed()))
+                return {"failure": "irrelevant", "result": result,
+                        "error": f"{name} returned results with no overlap "
+                                 "with the query, likely off-topic"}
 
         tel.tool_calls.append(ToolCall(name, args, "ok", result=result, ms=elapsed()))
         return {"result": result}
@@ -342,6 +378,17 @@ REFUSAL = re.compile(
     r"\b(cannot|can't|can not|unable to|don't have access|do not have access|"
     r"no access to)\b[^.]{0,60}\b(retrieve|access|browse|open|search|"
     r"real[- ]time|current|internet|web|live)\b", re.I)
+
+
+_CITE = re.compile(r"\[(\d+)\]")
+
+
+def check_citations(text: str, tel: Telemetry) -> list[str]:
+    """A citation number the facts block never issued is conflation made
+    visible: the model is pointing at a result that is not this turn's."""
+    valid = set(range(1, len(tel.tool_calls) + 1))
+    bad = {int(n) for n in _CITE.findall(text)} - valid
+    return [f"cited [{n}], no such result this turn" for n in sorted(bad)]
 
 
 def detect_fabrication(text: str, tel: Telemetry) -> list[str]:

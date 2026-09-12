@@ -18,7 +18,7 @@ import httpx
 
 from core.compact import extract_entities, extract_facts, summarise
 from core.documents import DocumentError, extract
-from core.harness import Harness, detect_fabrication
+from core.harness import Harness, check_citations, detect_fabrication
 from core.memory import Memory
 from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
           ttft_ms INT, total_ms INT, created REAL);
         CREATE TABLE IF NOT EXISTS tool_calls(
           id INTEGER PRIMARY KEY, session TEXT, name TEXT, outcome TEXT,
-          retries INT, ms INT, created REAL);
+          retries INT, ms INT, args TEXT, created REAL);
         """)
         # Sessions predate owner/title. CREATE TABLE IF NOT EXISTS skips an
         # existing table, so add the columns explicitly.
@@ -70,6 +70,9 @@ async def lifespan(app: FastAPI):
             conn.execute("ALTER TABLE sessions ADD COLUMN owner TEXT DEFAULT 'anon'")
         if "title" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
+        tc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tool_calls)")}
+        if "args" not in tc_cols:
+            conn.execute("ALTER TABLE tool_calls ADD COLUMN args TEXT")
     memory.init()
     yield
 
@@ -263,10 +266,16 @@ async def chat(ask: Ask, request: Request):
                         yield _sse(ev)
                     else:
                         tel = ev["telemetry"]
-                        flags = detect_fabrication(text, tel)
+                        flags = detect_fabrication(text, tel) + check_citations(text, tel)
                         stored = (f"[attached {doc.name}] {ask.message}"
                                   if doc else ask.message)
                         memory.add_turn(session, "user", stored)
+                        for c in tel.tool_calls:
+                            q = json.dumps(c.args, default=str)[:120]
+                            out = ("ok" if c.outcome == "ok"
+                                   else f"{c.outcome}: {str(c.error)[:80]}")
+                            memory.add_turn(session, "assistant",
+                                            f"[tool] {c.name}{q} -> {out}")
                         memory.add_turn(session, "assistant", text)
                         _persist(session, ask.message, text, tel)
                         yield _sse({"type": "done", "telemetry": {
@@ -303,7 +312,12 @@ async def _maintain(session: str, owner: str) -> None:
             if pending:
                 ctx = memory.load(session, owner)
                 summary = await summarise(client, base, model, pending, ctx.short)
-                entities = await extract_entities(client, base, model, pending)
+                # User turns only. Extracting from assistant prose pulled last
+                # turn's search results into a block labelled "keep these
+                # exact", which re-served them on every later turn.
+                user_only = [t for t in pending if t["role"] == "user"]
+                entities = (await extract_entities(client, base, model, user_only)
+                            if user_only else [])
                 if summary:
                     memory.apply_compaction(session, [t["id"] for t in pending],
                                             summary, entities)
@@ -334,9 +348,10 @@ def _persist(session: str, question: str, answer: str, tel) -> None:
             " VALUES(?,?,?,?,?,?)",
             (session, "assistant", answer, tel.ttft_ms, tel.total_ms, now))
         conn.executemany(
-            "INSERT INTO tool_calls(session,name,outcome,retries,ms,created)"
-            " VALUES(?,?,?,?,?,?)",
-            [(session, c.name, c.outcome, c.retries, c.ms, now) for c in tel.tool_calls])
+            "INSERT INTO tool_calls(session,name,outcome,retries,ms,args,created)"
+            " VALUES(?,?,?,?,?,?,?)",
+            [(session, c.name, c.outcome, c.retries, c.ms,
+              json.dumps(c.args, default=str)[:500], now) for c in tel.tool_calls])
 
 
 ARTIFACTS = Path("data/artifacts")
