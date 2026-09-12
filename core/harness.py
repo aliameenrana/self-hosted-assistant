@@ -5,7 +5,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from .personas import PERSONAS, TOOL_PROMPT, voice_prompt
+from .personas import (PERSONAS, STOP, TOOL_PROMPT, VOICE_MAX_TOKENS,
+                       voice_prompt)
 from .tools import ToolError
 from .tools.registry import Tool, execute
 
@@ -192,7 +193,8 @@ class Harness:
             ]
 
             body = {"model": self.model, "messages": messages, "stream": True,
-                    "cache_prompt": True}
+                    "cache_prompt": True, "max_tokens": VOICE_MAX_TOKENS,
+                    "stop": STOP}
             first = True
             async with client.stream("POST", f"{self.base_url}/v1/chat/completions",
                                      json=body, timeout=180.0) as resp:
