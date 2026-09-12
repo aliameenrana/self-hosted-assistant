@@ -5,11 +5,13 @@ const input = $("q"), send = $("send"), who = $("who");
 let session = null, me = null, busy = false, attachment = null;
 let lastModel = null;
 
+// Each one exercises a real tool call end to end, chosen because they
+// demonstrated the system honestly rather than because they look impressive.
 const SUGGESTIONS = [
-  ["🧠", "explain something", "how does a bloom filter actually work"],
-  ["🎨", "build a page", "make me a landing page for a coffee shop"],
+  ["🧮", "exact math", "what is 4871 times 392"],
+  ["🔎", "live search", "who won the last super bowl"],
+  ["🎨", "build a page", "make me a landing page for a dog walking business"],
   ["📄", "read a file", "attach a CV and ask what is weak"],
-  ["🧮", "work a problem", "what is 17 percent of 4200"],
 ];
 
 const at = () => scroll.scrollTo({ top: scroll.scrollHeight, behavior: "smooth" });
