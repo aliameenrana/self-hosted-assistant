@@ -21,6 +21,8 @@ FETCH_ALLOWLIST = {
 
 MAX_FETCH_BYTES = 200_000
 USER_AGENT = "self-hosted-assistant/0.1 (personal project)"
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 
 def _datetime(timezone_name: str = "UTC") -> dict[str, Any]:
@@ -69,25 +71,64 @@ def _calculator(expression: str) -> dict[str, Any]:
 
 
 def _web_search(query: str) -> dict[str, Any]:
+    """DuckDuckGo HTML endpoint.
+
+    The Instant Answer API (api.duckduckgo.com) was used first and is not a
+    search engine: it serves disambiguation and returns nothing for almost
+    every real query. Measured zero results for "pizza in johar town" and
+    "capital of cape verde", and three for "cars" only because that has a
+    Wikipedia disambiguation page. The model was told searches came back
+    empty and invented explanations for it.
+    """
     if len(query) > 300:
         raise ToolError("query too long")
     try:
-        resp = httpx.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": 1},
-            timeout=10.0, headers={"User-Agent": USER_AGENT},
+        resp = httpx.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            headers={"User-Agent": BROWSER_UA},
+            timeout=15.0, follow_redirects=True,
         )
     except httpx.RequestError as exc:
         raise ToolError(f"search failed: {type(exc).__name__}") from exc
     if resp.status_code >= 400:
         raise ToolError(f"search returned {resp.status_code}")
-    data = resp.json()
-    results = [
-        {"title": t.get("Text", ""), "url": t.get("FirstURL", "")}
-        for t in data.get("RelatedTopics", [])[:5]
-        if t.get("FirstURL")
-    ]
-    return {"query": query, "abstract": data.get("AbstractText", ""), "results": results}
+
+    results = []
+    for block in re.finditer(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+            r'(?:.*?class="result__snippet"[^>]*>(.*?)</a>)?',
+            resp.text, re.S):
+        href, title, snippet = block.group(1), block.group(2), block.group(3)
+        results.append({
+            "title": _untag(title),
+            "url": _unwrap(href),
+            "snippet": _untag(snippet or "")[:300],
+        })
+        if len(results) >= 6:
+            break
+
+    if not results:
+        raise ToolError(f"no results for {query!r}. Try different words.")
+    return {"query": query, "results": results}
+
+
+_TAG = re.compile(r"<[^>]+>")
+
+
+def _untag(html: str) -> str:
+    import html as _html
+    return _html.unescape(_TAG.sub("", html)).strip()
+
+
+def _unwrap(href: str) -> str:
+    """DDG wraps results in a redirect with the target in uddg."""
+    from urllib.parse import parse_qs, unquote, urlparse
+    if "duckduckgo.com/l/" in href or href.startswith("//duckduckgo.com/l/"):
+        qs = parse_qs(urlparse("https:" + href if href.startswith("//") else href).query)
+        if qs.get("uddg"):
+            return unquote(qs["uddg"][0])
+    return href
 
 
 def _fetch_url(url: str) -> dict[str, Any]:

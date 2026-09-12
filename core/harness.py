@@ -67,6 +67,7 @@ class Telemetry:
     tool_calls: list[ToolCall] = field(default_factory=list)
     turns: int = 0
     tools_offered: list[str] = field(default_factory=list)
+    trace: list[str] = field(default_factory=list)
 
     @property
     def fabrication_possible(self) -> bool:
@@ -127,7 +128,11 @@ class Harness:
                                     max_tokens=budget)
             msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
+            said = (msg.get("content") or "").strip()
             if not calls:
+                tel.trace.append(
+                    f"turn {turn + 1}: chose no tool"
+                    + (f" — {said[:200]}" if said else ""))
                 return messages
             messages.append(msg)
 
@@ -141,16 +146,26 @@ class Harness:
                     return messages
                 last_signature = signature
 
+                try:
+                    shown = json.dumps(json.loads(fn.get("arguments") or "{}"))[:160]
+                except json.JSONDecodeError:
+                    shown = (fn.get("arguments") or "")[:160]
+                tel.trace.append(f"turn {turn + 1}: call {name}({shown})")
                 record = await self._run_tool(call, tel)
                 payload = dict(record)
                 failure = payload.pop("failure", None)
                 if failure:
+                    tel.trace.append(
+                        f"  -> {failure}: {str(payload.get('error'))[:140]}")
                     payload["next_step"] = REPAIR[failure]
                     attempts[name] = attempts.get(name, 0) + 1
                     if attempts[name] > self.max_retries:
                         payload["next_step"] = (
                             f"{name} has failed {attempts[name]} times. Stop calling "
                             "it. Answer without it and say plainly that it failed.")
+                else:
+                    tel.trace.append(
+                        f"  -> ok: {json.dumps(payload.get('result'), default=str)[:200]}")
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
                                  "name": name,
                                  "content": json.dumps(payload, default=str)[:8000]})
@@ -209,6 +224,8 @@ class Harness:
         async with httpx.AsyncClient() as client:
             await self._tool_pass(client, question, history or [], tel)
 
+            tel.trace.append(f"voice pass: {len(tel.tool_calls)} verified "
+                             f"result(s) handed to the writer")
             facts = self._render_facts(tel)
             messages = [
                 {"role": "system", "content": voice_prompt(persona)},

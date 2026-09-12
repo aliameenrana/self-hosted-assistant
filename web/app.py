@@ -274,6 +274,7 @@ async def chat(ask: Ask, request: Request):
                             "total_ms": tel.total_ms, "turns": tel.turns,
                             "flags": flags,
                             "offered": tel.tools_offered,
+                            "trace": tel.trace,
                             "context": {"recent": len(ctx.recent),
                                         "entities": len(ctx.entities),
                                         "facts": len(ctx.long),

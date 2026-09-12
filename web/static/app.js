@@ -122,15 +122,17 @@ function meta(row, t) {
     if (open) { open.remove(); open = null; return; }
     open = document.createElement("div");
     open.className = "detail";
+    const trace = (t.trace || []).length
+      ? "\n\nwhat it did\n" + t.trace.map(l => "  " + l).join("\n")
+      : "";
     open.textContent = [
       `model         ${t.model}`,
       `first token   ${t.ttft_ms}ms`,
       `total         ${t.total_ms}ms`,
       `loop turns    ${t.turns}`,
       `tools offered ${(t.offered || []).join(", ") || "none"}`,
-      `tools used    ${t.tools.map(x => `${x.name} (${x.outcome}, ${x.ms}ms)`).join(", ") || "none"}`,
       `context       ${Math.ceil((c.recent || 0) / 2)} exchanges, ${c.entities || 0} pinned, ${c.facts || 0} facts${c.summary ? ", summarised" : ""}`,
-    ].join("\n");
+    ].join("\n") + trace;
     bar.after(open);
     at();
   };
