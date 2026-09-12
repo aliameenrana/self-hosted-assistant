@@ -66,6 +66,7 @@ class Telemetry:
     total_ms: int = 0
     tool_calls: list[ToolCall] = field(default_factory=list)
     turns: int = 0
+    tools_offered: list[str] = field(default_factory=list)
 
     @property
     def fabrication_possible(self) -> bool:
@@ -86,6 +87,7 @@ class Harness:
         self.decide_tokens = decide_tokens
         self.content_tokens = content_tokens
         self.bulky = {"create_webpage"}
+        self.router = None
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
                     tools: list[dict] | None = None, stream: bool = False,
@@ -107,14 +109,19 @@ class Harness:
         """Pass 1. Characterless. Returns verified tool results only."""
         messages = [{"role": "system", "content": TOOL_PROMPT}, *history,
                     {"role": "user", "content": question}]
-        schemas = [t.schema() for t in self.registry.values()]
+        # Offer only the tools relevant to this message. Router accuracy drops
+        # once a small model sees more than about eight at once.
+        offered = self.registry
+        if self.router:
+            offered, tel.tools_offered = self.router.select(question, self.registry)
+        schemas = [t.schema() for t in offered.values()]
         last_signature = None
         attempts: dict[str, int] = {}
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
             budget = (self.content_tokens
-                      if self.bulky & set(self.registry)
+                      if self.bulky & set(offered)
                       else self.decide_tokens)
             data = await self._chat(client, messages, tools=schemas,
                                     max_tokens=budget)

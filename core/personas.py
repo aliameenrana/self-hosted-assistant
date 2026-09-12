@@ -47,8 +47,16 @@ EXAMPLE_A = ("No, and the reason is team size, not technology. Microservices "
              "the day that actually hurts.")
 
 TOOL_PROMPT = f"""{NO_THINK} Decide whether a tool is needed for the user's \
-question. Use one only if you need current information, a calculation, or a \
-given page. Otherwise answer directly and briefly."""
+question.
+
+Only the tools relevant to this message are offered, so if one of them fits, \
+it is almost certainly the right call. Use it.
+
+ALWAYS use the tool for: arithmetic with numbers over two digits, the current \
+date or time, converting units, anything after your training data. Getting \
+these wrong from memory is the most common failure, and the tool is exact.
+
+Otherwise answer directly and briefly."""
 
 STOP = ["\n\nUser:", "\nUser:", "<|im_end|>"]
 VOICE_MAX_TOKENS = 1400          # ceiling, not a target

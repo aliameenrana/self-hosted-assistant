@@ -22,6 +22,7 @@ from core.harness import Harness, detect_fabrication
 from core.memory import Memory
 from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
+from core.tool_router import ToolRouter
 from core.tools.memory_tools import build as build_memory_tools
 from web import auth
 
@@ -253,6 +254,7 @@ async def chat(ask: Ask, request: Request):
                 harness.registry = {
                     **WEB_TOOLS,
                     **build_memory_tools(memory, session, owner)}
+                harness.router = ToolRouter(harness.registry)
                 text = ""
                 async for ev in harness.answer(question, persona,
                                                history=history):
@@ -271,6 +273,7 @@ async def chat(ask: Ask, request: Request):
                             "model": tel.model, "ttft_ms": tel.ttft_ms,
                             "total_ms": tel.total_ms, "turns": tel.turns,
                             "flags": flags,
+                            "offered": tel.tools_offered,
                             "context": {"recent": len(ctx.recent),
                                         "entities": len(ctx.entities),
                                         "facts": len(ctx.long),
