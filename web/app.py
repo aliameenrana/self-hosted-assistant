@@ -78,6 +78,13 @@ app.include_router(auth.router)
 
 @app.middleware("http")
 async def ensure_uid(request: Request, call_next):
+    # Assign before the handler, not after. Setting it only on the response
+    # meant the first request created a session owned by "anon" and the
+    # second arrived with a real uid, locking the user out of their own thread.
+    issued = None
+    if not request.cookies.get("uid"):
+        issued = "a:" + uuid.uuid4().hex
+        request.scope["uid"] = issued
     response = await call_next(request)
     migrate = getattr(request.state, "migrate", None)
     if migrate:
@@ -86,8 +93,8 @@ async def ensure_uid(request: Request, call_next):
             with db() as conn:
                 conn.execute("UPDATE sessions SET owner=? WHERE owner=?", (new, old))
                 conn.execute("UPDATE facts SET owner=? WHERE owner=?", (new, old))
-    if not request.cookies.get("uid"):
-        response.set_cookie("uid", "a:" + uuid.uuid4().hex, max_age=31_536_000,
+    if issued:
+        response.set_cookie("uid", issued, max_age=31_536_000,
                             httponly=True, samesite="lax")
     return response
 
@@ -122,14 +129,16 @@ async def upload(file: UploadFile = File(...)):
 
 
 def owner_of(request: Request) -> str:
-    return request.cookies.get("uid") or "anon"
+    return request.cookies.get("uid") or request.scope.get("uid") or "anon"
 
 
 @app.get("/api/session/{session}")
-def session_detail(session: str):
+def session_detail(session: str, request: Request):
+    # Ownership check. Session ids are 128 bit and unguessable, but an id that
+    # leaks through a shared link or a log must not hand over the transcript.
     with db() as conn:
-        row = conn.execute("SELECT persona FROM sessions WHERE id=?",
-                           (session,)).fetchone()
+        row = conn.execute("SELECT persona FROM sessions WHERE id=? AND owner=?",
+                           (session, owner_of(request))).fetchone()
         turns = conn.execute(
             "SELECT role, content FROM turns WHERE session=? ORDER BY id",
             (session,)).fetchall()
@@ -197,8 +206,10 @@ async def chat(ask: Ask, request: Request):
     switched_from = None
 
     with db() as conn:
-        row = conn.execute("SELECT persona FROM sessions WHERE id=?",
+        row = conn.execute("SELECT persona, owner FROM sessions WHERE id=?",
                            (session,)).fetchone()
+        if row and row["owner"] != owner:
+            raise HTTPException(403, "not your conversation")
         if row:
             persona = row["persona"]
             # Switching mid-conversation keeps the context. The new persona
