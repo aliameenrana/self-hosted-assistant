@@ -149,9 +149,12 @@ class Harness:
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
                     tools: list[dict] | None = None, stream: bool = False,
-                    max_tokens: int | None = None, force: bool = False) -> Any:
+                    max_tokens: int | None = None, force: bool = False,
+                    slot_id: int | None = None) -> Any:
         body: dict[str, Any] = {"model": self.model, "messages": messages,
                                 "stream": stream, "cache_prompt": True}
+        if slot_id is not None:
+            body["id_slot"] = slot_id
         if max_tokens:
             body["max_tokens"] = max_tokens
         if tools:
@@ -163,7 +166,8 @@ class Harness:
         return resp.json()
 
     async def _tool_pass(self, client: httpx.AsyncClient, question: str,
-                         history: list[dict], tel: Telemetry) -> list[dict]:
+                         history: list[dict], tel: Telemetry,
+                         slot_id: int | None = None) -> list[dict]:
         """Pass 1. Characterless. Returns verified tool results only."""
         messages = [{"role": "system", "content": TOOL_PROMPT}, *history,
                     {"role": "user", "content": question}]
@@ -182,12 +186,29 @@ class Harness:
             budget = max([t.budget for t in offered.values()] or
                           [self.decide_tokens])
             if tel.tool_calls:
-                # A tool already ran this turn. The model may be reasoning
-                # toward a second call, or about to answer directly - either
-                # way it needs more than "emit one JSON call" room.
+                # A tool already succeeded. On a single sequential GPU an
+                # extra confirmation round trip costs more than the tokens it
+                # saves, so chaining is only offered when the FIRST call
+                # itself signalled there might be more to do: it errored, or
+                # more than one tool was relevant enough to be offered in the
+                # first place. Otherwise treat one success as the answer and
+                # move straight to the voice pass. Measured: this cut a
+                # search+voice request from four LLM round trips to two.
+                last_ok = tel.tool_calls[-1].outcome == "ok"
+                # "tell me X and Y", "also", a second question mark: signals
+                # this message actually needs more than one lookup. Checked
+                # against the ORIGINAL question, not the tool count, since the
+                # router offering few tools does not mean few steps are needed.
+                multi_part = bool(re.search(
+                    r"\b(and (also |then )?(tell|check|find|get|what|when|"
+                    r"how|convert|search))\b|\?.*\?", question, re.I))
+                if last_ok and not multi_part and len(tel.tool_calls) == 1:
+                    tel.trace.append(f"turn {turn + 1}: one tool answered a "
+                                     "single-part question, skipping ahead")
+                    return messages
                 budget = max(budget, self.continuation_tokens)
             data = await self._chat(client, messages, tools=schemas,
-                                    max_tokens=budget)
+                                    max_tokens=budget, slot_id=slot_id)
             msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             said = (msg.get("content") or "").strip()
@@ -216,7 +237,8 @@ class Harness:
                     tel.trace.append(
                         f"turn {turn + 1}: refused in prose, forcing the tool")
                     data = await self._chat(client, messages, tools=schemas,
-                                            max_tokens=budget, force=True)
+                                            max_tokens=budget, force=True,
+                                            slot_id=slot_id)
                     msg = data["choices"][0]["message"]
                     calls = msg.get("tool_calls") or []
                     said = (msg.get("content") or "").strip()
@@ -319,14 +341,15 @@ class Harness:
         return {"result": result}
 
     async def answer(self, question: str, persona: str,
-                     history: list[dict] | None = None) -> AsyncIterator[dict]:
+                     history: list[dict] | None = None,
+                     slot_id: int | None = None) -> AsyncIterator[dict]:
         if persona not in PERSONAS:
             raise ValueError(f"unknown persona: {persona}")
         tel = Telemetry(model=self.model)
         started = time.monotonic()
 
         async with httpx.AsyncClient() as client:
-            await self._tool_pass(client, question, history or [], tel)
+            await self._tool_pass(client, question, history or [], tel, slot_id)
 
             tel.trace.append(f"voice pass: {len(tel.tool_calls)} verified "
                              f"result(s) handed to the writer")
@@ -340,6 +363,8 @@ class Harness:
             body = {"model": self.model, "messages": messages, "stream": True,
                     "cache_prompt": True, "max_tokens": VOICE_MAX_TOKENS,
                     "stop": STOP}
+            if slot_id is not None:
+                body["id_slot"] = slot_id
             first = True
             pending = ""
             async with client.stream("POST", f"{self.base_url}/v1/chat/completions",

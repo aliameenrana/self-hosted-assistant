@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import hashlib
 import re
 import sqlite3
 import time
@@ -29,6 +30,16 @@ from web import auth
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
 QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
 SLOTS = int(os.getenv("PARALLEL_SLOTS", "2"))
+
+
+def slot_for(session: str) -> int:
+    """Pin a session to one llama-server slot for the request's lifetime.
+
+    Two pass-1 round trips happen per message. Without pinning they can land
+    on different slots and each pays full prompt re-evaluation instead of
+    hitting the KV cache from the previous call.
+    """
+    return int(hashlib.sha256(session.encode()).hexdigest(), 16) % SLOTS
 
 harness = Harness(
     os.getenv("LLM_BASE_URL", "http://localhost:8090"),
@@ -260,7 +271,8 @@ async def chat(ask: Ask, request: Request):
                 harness.router = ToolRouter(harness.registry)
                 text = ""
                 async for ev in harness.answer(question, persona,
-                                               history=history):
+                                               history=history,
+                                               slot_id=slot_for(session)):
                     if ev["type"] == "token":
                         text += ev["text"]
                         yield _sse(ev)

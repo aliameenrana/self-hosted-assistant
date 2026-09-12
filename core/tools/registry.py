@@ -366,9 +366,13 @@ WEB_TOOLS: dict[str, Tool] = {
                   ["expression"]), _calculator),
         Tool("search_web",
              "Search the web and return titles, URLs and a summary. Use for "
-             "current events, recent releases, or anything after your training "
-             "data. Do not use for general knowledge you already have, or for "
-             "opinions and reasoning.",
+             "current events, recent releases, prices, scores, standings, who "
+             "holds a role or title now, or anything that changes over time - "
+             "your training data is stale and you cannot tell how stale. If "
+             "the fact could plausibly have changed since you were trained, "
+             "search rather than assert. Do not use for stable facts (math, "
+             "definitions, historical events already settled) or for opinions "
+             "and reasoning.",
              _obj({"query": {
                  "type": "string",
                  "description": "Search keywords, not a full sentence."}},
