@@ -79,8 +79,9 @@ REPAIR = {
                 "call it once more.",
     "tool_error": "The tool itself failed. Do not repeat that exact call. Try "
                   "a different tool, or stop and report the failure plainly.",
-    "empty": "That returned nothing useful. A different query might work, or "
-             "answer from your own knowledge and say the lookup came back empty.",
+    "empty": "That returned nothing. Retry ONCE with simpler or more common "
+             "words: drop the location, the preposition, or any rare term. "
+             "Do not answer from memory as though you had looked it up.",
 }
 
 
@@ -190,8 +191,22 @@ class Harness:
             msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             said = (msg.get("content") or "").strip()
-            if data["choices"][0].get("finish_reason") == "length" and not calls:
+            truncated = (data["choices"][0].get("finish_reason") == "length"
+                        and not calls)
+            if truncated:
                 tel.trace.append(f"turn {turn + 1}: hit the {budget} token cap")
+                # It committed to answering without a tool but ran out of room
+                # mid-answer. Pass 1's prose is discarded either way, so retry
+                # with one token asking only for the decision, not the prose.
+                data = await self._chat(
+                    client, messages + [{"role": "assistant", "content": ""},
+                    {"role": "user", "content":
+                     "Reply with just a tool call if one is needed, or a "
+                     "single word 'none' if not. No other text."}],
+                    tools=schemas, max_tokens=32)
+                msg = data["choices"][0]["message"]
+                calls = msg.get("tool_calls") or []
+                said = ""
             if not calls:
                 # Omission is the dominant failure for models this size: it
                 # answers in prose while holding the tool. Force the call once
