@@ -88,6 +88,35 @@ function render(bubble, text) {
   });
 }
 
+// The trace is a technical log. Rendered as short first-person lines so it
+// reads as reasoning rather than a stack trace.
+function readable(line) {
+  let m;
+  if ((m = line.match(/^turn (\d+): call (\w+)\((.*)\)$/))) {
+    return `Turn ${m[1]}: I'll use ${m[2].replace(/_/g, " ")} with ${m[3] || "no arguments"}.`;
+  }
+  if ((m = line.match(/^  -> ok: (.*)$/))) {
+    return `That worked. Result: ${m[1].slice(0, 140)}`;
+  }
+  if ((m = line.match(/^  -> (\w+): (.*)$/))) {
+    return `That didn't work (${m[1]}): ${m[2].slice(0, 140)}`;
+  }
+  if ((m = line.match(/^turn (\d+): chose no tool(?: — (.*))?$/))) {
+    return m[2] ? `Turn ${m[1]}: I don't need a tool. ${m[2].slice(0, 160)}`
+                : `Turn ${m[1]}: No tool needed, answering directly.`;
+  }
+  if ((m = line.match(/^turn (\d+): hit the (\d+) token cap$/))) {
+    return `Turn ${m[1]}: ran out of room (${m[2]} tokens) before finishing that thought.`;
+  }
+  if ((m = line.match(/^turn (\d+): refused in prose, forcing the tool$/))) {
+    return `Turn ${m[1]}: I said I couldn't do that, which was wrong. Forcing myself to actually try.`;
+  }
+  if ((m = line.match(/^voice pass: (\d+) verified result\(s\) handed to the writer$/))) {
+    return `Handing ${m[1]} verified result${m[1] === "1" ? "" : "s"} to the part of me that writes the reply.`;
+  }
+  return line;
+}
+
 const chip = (cls, text) => {
   const s = document.createElement("span");
   s.className = "chip " + cls;
@@ -122,17 +151,28 @@ function meta(row, t) {
     if (open) { open.remove(); open = null; return; }
     open = document.createElement("div");
     open.className = "detail";
-    const trace = (t.trace || []).length
-      ? "\n\nwhat it did\n" + t.trace.map(l => "  " + l).join("\n")
-      : "";
-    open.textContent = [
+    open.innerHTML = "";
+    const stats = document.createElement("div");
+    stats.textContent = [
       `model         ${t.model}`,
       `first token   ${t.ttft_ms}ms`,
       `total         ${t.total_ms}ms`,
-      `loop turns    ${t.turns}`,
       `tools offered ${(t.offered || []).join(", ") || "none"}`,
       `context       ${Math.ceil((c.recent || 0) / 2)} exchanges, ${c.entities || 0} pinned, ${c.facts || 0} facts${c.summary ? ", summarised" : ""}`,
-    ].join("\n") + trace;
+    ].join("\n");
+    open.append(stats);
+    if ((t.trace || []).length) {
+      const think = document.createElement("div");
+      think.className = "think";
+      think.innerHTML = "<b>thinking</b>";
+      for (const line of t.trace) {
+        const row = document.createElement("div");
+        row.className = "think-line";
+        row.textContent = readable(line);
+        think.append(row);
+      }
+      open.append(think);
+    }
     bar.after(open);
     at();
   };

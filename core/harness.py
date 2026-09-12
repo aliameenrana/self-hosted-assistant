@@ -41,6 +41,22 @@ def _recap(history: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _summarise_result(name: str, result: Any) -> str:
+    """One line for the trace, not the raw payload. Keeps the transcript
+    readable and keeps token cost down when it round-trips through context."""
+    if not isinstance(result, dict):
+        return str(result)[:120]
+    if "results" in result:
+        n = len(result["results"])
+        first = result["results"][0]["title"] if result["results"] else ""
+        return f"{n} result(s), top: {first[:80]}" if n else "no results"
+    if "content" in result:
+        return f"{result.get('title') or 'page'}, {len(result['content'])} chars"
+    if "result" in result:
+        return str(result["result"])
+    return json.dumps(result, default=str)[:120]
+
+
 def strip_em_dashes(text: str) -> str:
     """Prompting for this failed repeatedly, so it is enforced after the fact.
 
@@ -119,13 +135,14 @@ class Telemetry:
 class Harness:
     def __init__(self, base_url: str, model: str, registry: dict[str, Tool],
                  max_turns: int = 6, max_retries: int = 2,
-                 decide_tokens: int = 64):
+                 decide_tokens: int = 64, continuation_tokens: int = 400):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.registry = registry
         self.max_turns = max_turns
         self.max_retries = max_retries
         self.decide_tokens = decide_tokens
+        self.continuation_tokens = continuation_tokens
         self.router = None
 
 
@@ -163,6 +180,11 @@ class Harness:
             tel.turns = turn + 1
             budget = max([t.budget for t in offered.values()] or
                           [self.decide_tokens])
+            if tel.tool_calls:
+                # A tool already ran this turn. The model may be reasoning
+                # toward a second call, or about to answer directly - either
+                # way it needs more than "emit one JSON call" room.
+                budget = max(budget, self.continuation_tokens)
             data = await self._chat(client, messages, tools=schemas,
                                     max_tokens=budget)
             msg = data["choices"][0]["message"]
@@ -218,8 +240,7 @@ class Harness:
                             f"{name} has failed {attempts[name]} times. Stop calling "
                             "it. Answer without it and say plainly that it failed.")
                 else:
-                    tel.trace.append(
-                        f"  -> ok: {json.dumps(payload.get('result'), default=str)[:200]}")
+                    tel.trace.append(f"  -> ok: {_summarise_result(name, payload.get('result'))}")
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
                                  "name": name,
                                  "content": json.dumps(payload, default=str)[:8000]})

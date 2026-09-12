@@ -96,9 +96,15 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
 .chip.mem{background:var(--grape-soft);border-color:#ddd3ff;color:var(--grape)}
 .chip button{background:0;border:0;font:inherit;color:inherit;cursor:pointer;padding:0}
 .more{cursor:pointer;border-style:dashed}
-.detail{margin:6px 0 0 4px;max-width:560px;padding:10px 13px;border:1px dashed var(--line);border-radius:13px;
+.detail{margin:6px 0 0 4px;max-width:560px;padding:12px 14px;border:1px solid var(--line);border-radius:13px;
   background:#fffdf9;font:11.5px/1.7 ui-monospace,SFMono-Regular,monospace;color:var(--soft);
   white-space:pre-wrap;animation:pop .25s}
+.think{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);font-family:inherit}
+.think b{display:block;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--grape);margin-bottom:6px;font-weight:700}
+.think-line{padding:5px 0 5px 14px;border-left:2px solid var(--grape-soft);margin-bottom:2px;
+  color:var(--ink);font-style:italic}
+.think-line:before{content:"› ";color:var(--grape);font-style:normal}
 
 /* artifact */
 .artifact{margin-top:10px;width:min(560px,82%);border:1px solid var(--line);border-radius:16px;overflow:hidden;
