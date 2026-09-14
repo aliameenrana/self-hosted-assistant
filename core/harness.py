@@ -220,6 +220,7 @@ class Harness:
         last_signature = None
         attempts: dict[str, int] = {}
         forced = False
+        full_retry = False
 
         for turn in range(self.max_turns):
             tel.turns = turn + 1
@@ -269,6 +270,28 @@ class Harness:
                 calls = msg.get("tool_calls") or []
                 said = ""
             if not calls:
+                # The router is a lexical heuristic, not a guarantee (measured
+                # 88% top-1, not 100%), and when it under-offers, the model
+                # previously had no way to say so, it could only pick from a
+                # wrong menu or silently answer without a tool. NEED_OTHER_TOOL
+                # is that escape hatch: the model asks for the full registry
+                # instead of guessing. Costs one extra round trip only on the
+                # rare miss, not on every turn.
+                if (self.router and not full_retry
+                        and said.strip().upper().startswith("NEED_OTHER_TOOL")):
+                    full_retry = True
+                    all_schemas = [t.schema() for t in self.registry.values()]
+                    tel.trace.append(
+                        f"turn {turn + 1}: router's offer did not fit, "
+                        "retrying with the full tool list")
+                    data = await self._chat(client, messages, tools=all_schemas,
+                                            max_tokens=budget, slot_id=slot_id)
+                    msg = data["choices"][0]["message"]
+                    calls = msg.get("tool_calls") or []
+                    said = (msg.get("content") or "").strip()
+                    if calls:
+                        schemas = all_schemas
+                        offered = self.registry
                 # Omission is the dominant failure for models this size: it
                 # answers in prose while holding the tool. Force the call once
                 # rather than accept a refusal.

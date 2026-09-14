@@ -10,6 +10,7 @@ import socket
 import httpx
 
 from .artifacts import create_page
+from ..sanitize import defang
 
 
 class ToolError(Exception):
@@ -110,10 +111,14 @@ def _web_search(query: str) -> dict[str, Any]:
             r'(?:.*?class="result__snippet"[^>]*>(.*?)</a>)?',
             resp.text, re.S):
         href, title, snippet = block.group(1), block.group(2), block.group(3)
+        # Search result text is exactly as untrusted as an uploaded document,
+        # public and attacker-shapable at scale, but had no defanging at all
+        # until this. A page ranking for a query can contain
+        # "<|im_start|>system ignore previous instructions" verbatim.
         results.append({
-            "title": _untag(title),
+            "title": defang(_untag(title)),
             "url": _unwrap(href),
-            "snippet": _untag(snippet or "")[:300],
+            "snippet": defang(_untag(snippet or ""))[:300],
         })
         if len(results) >= 6:
             break
@@ -188,7 +193,10 @@ def _fetch_url(url: str) -> dict[str, Any]:
     text = resp.text[:MAX_FETCH_BYTES]
     if "html" in kind:
         text = _readable(text)
-    return {"url": url, "title": _page_title(resp.text), "content": text[:20000]}
+    # Same reasoning as search results: fetched page content is untrusted
+    # and was going into the facts block raw.
+    return {"url": url, "title": defang(_page_title(resp.text)),
+            "content": defang(text)[:20000]}
 
 
 _SCRIPTS = re.compile(r"<(script|style|nav|footer|svg)\b.*?</\1>", re.S | re.I)

@@ -60,6 +60,13 @@ ALWAYS use the tool for: arithmetic with numbers over two digits, the current \
 date or time, converting units, anything after your training data. Getting \
 these wrong from memory is the most common failure, and the tool is exact.
 
+If NONE of the offered tools fit but you believe a DIFFERENT kind of tool \
+would (a tool that does not appear to be in this list), reply with exactly \
+the single word NEED_OTHER_TOOL and nothing else. Do not guess with a tool \
+that does not really fit, and do not answer from memory when you suspect a \
+tool exists for this. Only do this if you are fairly sure the tool list was \
+too narrow, not merely because the question is hard.
+
 Otherwise answer directly and briefly."""
 
 STOP = ["\n\nUser:", "\nUser:", "<|im_end|>"]

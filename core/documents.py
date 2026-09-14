@@ -36,22 +36,9 @@ class DocumentError(Exception):
 
 # Neutralise the phrasings that models treat as role boundaries. The text is
 # still readable and quotable, it just stops looking like chat structure.
-_INJECTION = re.compile(
-    r"(?im)"
-    # Chat template delimiters first. These forge the role boundary itself and
-    # are the only injection that worked in testing.
-    r"<\s*\|\s*[a-z_]+\s*\|\s*>"
-    r"|\[/?INST\]|<<\s*/?SYS\s*>>|###\s*(system|instruction|human|assistant)"
-    r"|^\s*(system|assistant|user|human)\s*:"
-    r"|ignore\s+(all\s+)?(previous|prior|above)\s+instructions?"
-    r"|disregard\s+(the\s+)?(system\s+)?(prompt|instructions?)"
-    r"|you\s+are\s+now\s+in\s+\w+\s+mode"
-    r"|new\s+(directive|instructions?)\s+from"
-    r"|<\s*/?\s*(system|im_start|im_end)\s*>")
-
-
-def _defang(text: str) -> str:
-    return _INJECTION.sub(lambda m: "\u200b".join(m.group(0)), text)
+from .sanitize import defang as _defang  # moved to core.sanitize so
+# search_web and read_url can share the same protection instead of only
+# uploaded documents having it
 
 
 @dataclass

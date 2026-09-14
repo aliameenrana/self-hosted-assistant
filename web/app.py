@@ -23,6 +23,7 @@ from core.harness import (Harness, check_citations, check_computed_after_failure
                           detect_fabrication)
 from core.episodic import Episodic
 from core.procedural import Procedural
+from core.ratelimit import RateLimiter
 from core.memory import Memory
 from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
@@ -56,6 +57,7 @@ _waiting = 0
 memory = Memory(lambda: db())
 episodic = Episodic(lambda: db())
 procedural = Procedural(lambda: db())
+ratelimit = RateLimiter()
 
 
 def db() -> sqlite3.Connection:
@@ -135,7 +137,11 @@ _attachments: dict[str, object] = {}
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...), request: Request = None):
+    allowed, retry_after = ratelimit.check(owner_of(request))
+    if not allowed:
+        raise HTTPException(429, f"slow down, try again in {retry_after}s",
+                            headers={"Retry-After": str(retry_after)})
     data = await file.read()
     try:
         doc = extract(data, file.filename or "file", file.content_type or "")
@@ -221,10 +227,17 @@ def stats():
 @app.post("/api/chat")
 async def chat(ask: Ask, request: Request):
     global _waiting
+    owner = owner_of(request)
+    # Per-owner, not global. The queue cap and slot semaphore stop the whole
+    # server from being overwhelmed, but did nothing to stop one visitor from
+    # occupying both GPU slots back to back with rapid requests.
+    allowed, retry_after = ratelimit.check(owner)
+    if not allowed:
+        raise HTTPException(429, f"slow down, try again in {retry_after}s",
+                            headers={"Retry-After": str(retry_after)})
     if _waiting >= QUEUE_CAP:
         raise HTTPException(503, "queue full, try in a minute")
 
-    owner = owner_of(request)
     session = ask.session or uuid.uuid4().hex
     switched_from = None
 
