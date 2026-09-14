@@ -236,13 +236,32 @@ class Harness:
                 # move straight to the voice pass. Measured: this cut a
                 # search+voice request from four LLM round trips to two.
                 last_ok = tel.tool_calls[-1].outcome == "ok"
-                # "tell me X and Y", "also", a second question mark: signals
-                # this message actually needs more than one lookup. Checked
-                # against the ORIGINAL question, not the tool count, since the
-                # router offering few tools does not mean few steps are needed.
-                multi_part = bool(re.search(
+                # Widened after a real miss: "search for the score, then
+                # multiply the winner's score by 1000" matched none of the
+                # original phrasings, so the model never got a second turn
+                # to call calculate and did the multiplication itself in the
+                # voice pass instead, exactly the fabrication this harness
+                # exists to prevent.
+                #
+                # First widening was too broad: "what is 4871 times 392" now
+                # matched on "times" even though calculate already answered
+                # it fully in one step, which kept the loop open for no
+                # reason and made a purely single-step question intermittently
+                # slower and less predictable. The arithmetic-operation words
+                # are only real chaining signal when the tool that already
+                # ran was NOT itself a compute tool: "search, then multiply"
+                # means the multiply is still owed, "what is X times Y"
+                # answered by calculate means it already happened.
+                sequencing = bool(re.search(
                     r"\b(and (also |then )?(tell|check|find|get|what|when|"
-                    r"how|convert|search))\b|\?.*\?", question, re.I))
+                    r"how|convert|search))\b|\?.*\?"
+                    r"|\b(then|after that|next|once you|and then)\b",
+                    question, re.I))
+                last_was_compute = tel.tool_calls[-1].name in COMPUTE_TOOLS
+                arithmetic_owed = (not last_was_compute and bool(re.search(
+                    r"\b(multiply|divide|add|subtract|percent(age)?|times|"
+                    r"convert|calculate)\b", question, re.I)))
+                multi_part = sequencing or arithmetic_owed
                 if last_ok and not multi_part and len(tel.tool_calls) == 1:
                     tel.trace.append(f"turn {turn + 1}: one tool answered a "
                                      "single-part question, skipping ahead")
@@ -588,19 +607,40 @@ COMPUTE_TOOLS = {"calculate", "convert_units"}
 _DIGITS = re.compile(r"\d")
 
 
-def check_computed_after_failure(text: str, tel: Telemetry) -> list[str]:
+# An explicit arithmetic operation named in the question, not just any
+# digit. "what year did X happen" has digits and needs no tool; "multiply
+# the score by 1000" names an operation the harness should have verified.
+# Found live: "search for the score, then multiply the winner's score by
+# 1000" never called calculate at all, the multi_part heuristic that is
+# supposed to keep the loop open for a second tool call did not match this
+# phrasing, and the voice pass did "29 x 1000 = 29,000" itself with no tool
+# behind it, correct this time, but exactly the pattern that produced the
+# wrong litres/gallons number earlier.
+_ARITHMETIC_OP = re.compile(
+    r"\b(multiply|divide|add|subtract|percent(age)?|times|convert)\b", re.I)
+
+
+def check_computed_after_failure(text: str, tel: Telemetry,
+                                 question: str = "") -> list[str]:
+    ran = {c.name for c in tel.tool_calls if c.name in COMPUTE_TOOLS}
     failed = {c.name for c in tel.tool_calls
              if c.name in COMPUTE_TOOLS and c.outcome != "ok"}
-    if not failed:
-        return []
     succeeded = {c.name for c in tel.tool_calls
                 if c.name in COMPUTE_TOOLS and c.outcome == "ok"}
-    # A digit appearing in the reply when the only compute tool(s) offered
-    # all failed and none succeeded is very likely a number the model
-    # invented, since nothing in the facts block could have supplied one.
+
+    # Case 1: a compute tool was tried and failed, nothing succeeded to back
+    # a number, but the reply contains one anyway.
     if failed and not succeeded and _DIGITS.search(text):
         return [f"a number appears in the reply but {', '.join(sorted(failed))} "
                 f"failed and returned none"]
+
+    # Case 2: the question names an arithmetic operation, no compute tool
+    # ran AT ALL, and the reply computed one anyway.
+    if (not ran and question and _ARITHMETIC_OP.search(question)
+            and _DIGITS.search(text)):
+        return ["the question named an arithmetic operation but no "
+                "calculate or convert_units call was made, the number in "
+                "the reply was not verified by a tool"]
     return []
 
 

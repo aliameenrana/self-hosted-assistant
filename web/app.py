@@ -305,7 +305,7 @@ async def chat(ask: Ask, request: Request):
                         tel = ev["telemetry"]
                         flags = (detect_fabrication(text, tel) +
                                 check_citations(text, tel) +
-                                check_computed_after_failure(text, tel))
+                                check_computed_after_failure(text, tel, question))
                         stored = (f"[attached {doc.name}] {ask.message}"
                                   if doc else ask.message)
                         memory.add_turn(session, "user", stored)
