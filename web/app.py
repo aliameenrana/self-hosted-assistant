@@ -298,8 +298,14 @@ async def chat(ask: Ask, request: Request):
                         memory.add_turn(session, "user", stored)
                         for c in tel.tool_calls:
                             q = json.dumps(c.args, default=str)[:120]
-                            out = ("ok" if c.outcome == "ok"
-                                   else f"{c.outcome}: {str(c.error)[:80]}")
+                            # Carry the actual result, not just ok/fail. This
+                            # line is what _recap surfaces to later turns, so
+                            # without the value a fact like today's date was
+                            # recorded as "ok" with nothing usable in it, and
+                            # a follow-up question had nothing to reason from.
+                            out = (json.dumps(c.result, default=str)[:200]
+                                  if c.outcome == "ok"
+                                  else f"{c.outcome}: {str(c.error)[:80]}")
                             memory.add_turn(session, "assistant",
                                             f"[tool] {c.name}{q} -> {out}")
                         memory.add_turn(session, "assistant", text)

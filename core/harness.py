@@ -24,19 +24,34 @@ class ToolCall:
 
 
 def _recap(history: list[dict]) -> str:
-    """Topics only, never prior assistant prose.
+    """Topics only, never prior assistant PROSE.
 
     Splicing raw history into the voice pass let it read last turn's rendered
     results as its own confident text and re-serve them for this turn. That is
     where the Pixar film appeared in a pizza search.
+
+    [tool] lines are the one exception, carried through verbatim. They are
+    structured facts the harness wrote, not the model's own narration, so the
+    conflation risk above does not apply to them. Excluding them alongside
+    prose meant a fact fetched in an earlier turn, like the current date,
+    became invisible to every later turn in the same conversation: asked
+    "what is the date" then "is June in the past", the second question had
+    no access to the first answer at all and the model invented a year.
     """
     asks = [m["content"].strip().replace("\n", " ")[:90]
             for m in history if m.get("role") == "user"][-4:]
+    tool_facts = [m["content"] for m in history
+                 if m.get("role") == "assistant"
+                 and m["content"].startswith("[tool]")][-6:]
     system = [m["content"] for m in history if m.get("role") == "system"]
     parts = []
     if asks:
         parts.append("Earlier in this conversation the user asked about: "
                      + "; ".join(asks))
+    if tool_facts:
+        parts.append("Facts already established earlier in this conversation, "
+                     "still true now unless the user says otherwise:\n"
+                     + "\n".join(tool_facts))
     parts.extend(system)
     return "\n\n".join(parts)
 
@@ -422,9 +437,9 @@ class Harness:
 
             tel.trace.append(f"voice pass: {len(tel.tool_calls)} verified "
                              f"result(s) handed to the writer")
-            facts = self._render_facts(tel)
-            messages = [{"role": "system", "content": voice_prompt(persona)}]
             recap = _recap(history or [])
+            facts = self._render_facts(tel, has_recap=bool(recap))
+            messages = [{"role": "system", "content": voice_prompt(persona)}]
             if recap:
                 messages.append({"role": "system", "content": recap})
             messages.append({"role": "user", "content": f"{question}\n\n{facts}"})
@@ -469,8 +484,21 @@ class Harness:
         yield {"type": "done", "telemetry": tel}
 
     @staticmethod
-    def _render_facts(tel: Telemetry) -> str:
+    def _render_facts(tel: Telemetry, has_recap: bool = False) -> str:
         if not tel.tool_calls:
+            # This note used to say flatly "no tools ran, answer from your own
+            # knowledge" regardless of earlier turns. Found live: a follow-up
+            # question needing the date fetched last turn got this note, and
+            # the model appeared to read "no tools ran" as "you have no
+            # information at all" and override the recap sitting right above
+            # it, inverting a date comparison it got right in isolation. The
+            # note is now honest about which case applies.
+            if has_recap:
+                return ("[Internal note, never mention this: no tool ran on "
+                        "THIS message, but facts from earlier turns are given "
+                        "above in the recap. Use those if they answer the "
+                        "question. Only fall back to your own knowledge for "
+                        "anything the recap does not cover.]")
             return ("[Internal note, never mention this: no tools ran. Answer "
                     "normally from your own knowledge. Say you are unsure only if "
                     "you genuinely are.]")
