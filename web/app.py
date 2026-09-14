@@ -19,7 +19,8 @@ import httpx
 
 from core.compact import extract_entities, extract_facts, summarise
 from core.documents import DocumentError, extract
-from core.harness import Harness, check_citations, detect_fabrication
+from core.harness import (Harness, check_citations, check_computed_after_failure,
+                          detect_fabrication)
 from core.episodic import Episodic
 from core.procedural import Procedural
 from core.memory import Memory
@@ -289,7 +290,9 @@ async def chat(ask: Ask, request: Request):
                         yield _sse(ev)
                     else:
                         tel = ev["telemetry"]
-                        flags = detect_fabrication(text, tel) + check_citations(text, tel)
+                        flags = (detect_fabrication(text, tel) +
+                                check_citations(text, tel) +
+                                check_computed_after_failure(text, tel))
                         stored = (f"[attached {doc.name}] {ask.message}"
                                   if doc else ask.message)
                         memory.add_turn(session, "user", stored)

@@ -489,8 +489,20 @@ class Harness:
                 lines.append(f"[{i}] {call.name}{args} returned: "
                              f"{json.dumps(call.result, default=str)[:2000]}")
             else:
+                # The all-failed branch above had a strong instruction not to
+                # compute a substitute answer from memory. A single failed
+                # call mixed with successes had only "say so in one clause",
+                # which is weaker, and the model used it as license to
+                # silently compute the failed conversion itself: asked to
+                # convert litres to gallons, the tool errored on the unit
+                # name, and the voice pass answered "approximately 0.787
+                # gallons", tied to no tool result at all. The
+                # instruction is now identical in strength regardless of how
+                # many other calls succeeded.
                 lines.append(f"[{i}] {call.name}{args} FAILED: {call.error}. "
-                             "Say so in one clause, do not explain why.")
+                             "Say so in one clause. Do NOT compute or guess "
+                             "this value yourself from memory. Do NOT present "
+                             "any number for this as if it came from the tool.")
         return "\n".join(lines)
 
 
@@ -511,6 +523,34 @@ REFUSAL = re.compile(
 
 
 _CITE = re.compile(r"\[(\d+)\]")
+
+
+# calculate and convert_units are the computational counterparts of
+# search_web/read_url: when they fail, the honest reply states the failure
+# and stops, it never substitutes a number. A model that ignores this is
+# indistinguishable from one that ignores "I searched" for lookups, so it
+# gets the same treatment: a deterministic check, not a hope that the prompt
+# held. Found live: convert_units errored on "litres" vs "l", and the voice
+# pass answered "approximately 0.787 gallons" anyway, a plausible-looking
+# number computed from memory with no tool result behind it at all.
+COMPUTE_TOOLS = {"calculate", "convert_units"}
+_DIGITS = re.compile(r"\d")
+
+
+def check_computed_after_failure(text: str, tel: Telemetry) -> list[str]:
+    failed = {c.name for c in tel.tool_calls
+             if c.name in COMPUTE_TOOLS and c.outcome != "ok"}
+    if not failed:
+        return []
+    succeeded = {c.name for c in tel.tool_calls
+                if c.name in COMPUTE_TOOLS and c.outcome == "ok"}
+    # A digit appearing in the reply when the only compute tool(s) offered
+    # all failed and none succeeded is very likely a number the model
+    # invented, since nothing in the facts block could have supplied one.
+    if failed and not succeeded and _DIGITS.search(text):
+        return [f"a number appears in the reply but {', '.join(sorted(failed))} "
+                f"failed and returned none"]
+    return []
 
 
 def check_citations(text: str, tel: Telemetry) -> list[str]:
