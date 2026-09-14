@@ -146,6 +146,7 @@ class Harness:
         self.continuation_tokens = continuation_tokens
         self.router = None
         self.episodic = None
+        self.procedural = None
 
 
     async def _chat(self, client: httpx.AsyncClient, messages: list[dict],
@@ -178,6 +179,16 @@ class Harness:
         offered = self.registry
         if self.router:
             offered, tel.tools_offered = self.router.select(question, self.registry)
+        if self.procedural:
+            recalled = self.procedural.recall(question)
+            if recalled:
+                extra = {n: self.registry[n] for n in recalled
+                         if n in self.registry and n not in offered}
+                if extra:
+                    offered = {**offered, **extra}
+                    tel.tools_offered = list(offered)
+                    tel.trace.append(f"procedural: past pattern suggests "
+                                     f"{', '.join(recalled)} together")
         schemas = [t.schema() for t in offered.values()]
 
         # A cheap, cheerless nudge if a similarly worded query already failed
@@ -403,6 +414,11 @@ class Harness:
                 else:
                     get_status.cancel()
             await tool_task
+
+            if self.procedural:
+                ok_tools = [c.name for c in tel.tool_calls if c.outcome == "ok"]
+                if len(set(ok_tools)) >= 2:
+                    self.procedural.record_success(question, ok_tools)
 
             tel.trace.append(f"voice pass: {len(tel.tool_calls)} verified "
                              f"result(s) handed to the writer")

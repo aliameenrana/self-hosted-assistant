@@ -21,6 +21,7 @@ from core.compact import extract_entities, extract_facts, summarise
 from core.documents import DocumentError, extract
 from core.harness import Harness, check_citations, detect_fabrication
 from core.episodic import Episodic
+from core.procedural import Procedural
 from core.memory import Memory
 from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
@@ -53,6 +54,7 @@ _slots = asyncio.Semaphore(SLOTS)
 _waiting = 0
 memory = Memory(lambda: db())
 episodic = Episodic(lambda: db())
+procedural = Procedural(lambda: db())
 
 
 def db() -> sqlite3.Connection:
@@ -88,6 +90,7 @@ async def lifespan(app: FastAPI):
             conn.execute("ALTER TABLE tool_calls ADD COLUMN args TEXT")
     memory.init()
     episodic.init()
+    procedural.init()
     yield
 
 
@@ -273,6 +276,7 @@ async def chat(ask: Ask, request: Request):
                     **build_memory_tools(memory, session, owner)}
                 harness.router = ToolRouter(harness.registry)
                 harness.episodic = episodic
+                harness.procedural = procedural
                 text = ""
                 async for ev in harness.answer(question, persona,
                                                history=history,
