@@ -38,8 +38,25 @@ class Session:
             urllib.request.HTTPCookieProcessor(self.jar))
         self.session = None
 
-    def ask(self, message: str, timeout: float = 90.0) -> tuple[str, dict]:
-        body = json.dumps({"session": self.session, "message": message}).encode()
+    def upload(self, path: str, content_type: str) -> str:
+        boundary = "evalboundary"
+        with open(path, "rb") as f:
+            data = f.read()
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{path.split("/")[-1]}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"{BASE}/api/upload", body,
+            {"content-type": f"multipart/form-data; boundary={boundary}"})
+        with self.op.open(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())["id"]
+
+    def ask(self, message: str, timeout: float = 90.0,
+           attachment: str | None = None) -> tuple[str, dict]:
+        body = json.dumps({"session": self.session, "message": message,
+                           "attachment": attachment}).encode()
         req = urllib.request.Request(f"{BASE}/api/chat", body,
                                      {"content-type": "application/json"})
         text, tel = "", {}
@@ -358,6 +375,48 @@ def case_injection_in_live_search():
     ], verify)
 
 
+def case_image_tools():
+    """Image upload through to a real tool call and a servable artifact.
+    Each message re-sends the attachment id, matching what the frontend
+    actually does today (it clears the in-flight attachment after the
+    message that included it, same as text documents) - this is not yet a
+    test of cross-turn recall without re-attaching, which the backend
+    permits but the frontend does not currently offer a way to trigger."""
+    import tempfile
+    from PIL import Image as _Image
+
+    def verify(replies, tels):
+        problems = []
+        if "crop_image" not in [x["name"] for x in tels[0]["tools"]]:
+            problems.append("did not call crop_image on the first ask")
+        if tels[0].get("flags"):
+            problems.append(f"fabrication flags on crop: {tels[0]['flags']}")
+        if "resize_image" not in [x["name"] for x in tels[1]["tools"]]:
+            problems.append("did not call resize_image on the second ask")
+        if tels[1].get("flags"):
+            problems.append(f"fabrication flags on resize: {tels[1]['flags']}")
+        return problems
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        _Image.new("RGB", (200, 100), color=(10, 20, 30)).save(f.name)
+        path = f.name
+
+    s = Session()
+    img_id = s.upload(path, "image/png")
+    replies, tels = [], []
+    for msg in ["crop this image to the top-left 100x50 pixels",
+                "now resize this image to 50x50"]:
+        text, tel = s.ask(msg, attachment=img_id)
+        replies.append(text)
+        tels.append(tel)
+    problems = verify(replies, tels)
+    mark = "FAIL" if problems else "ok  "
+    print(f"{mark} image_tools (upload, crop, resize, real artifacts)")
+    for p in problems:
+        print(f"      {p}")
+    return not problems
+
+
 CASES.extend([
     case_multihop_chaining,
     case_single_step_not_overchained,
@@ -366,6 +425,7 @@ CASES.extend([
     case_ambiguous_no_tool_needed,
     case_error_recovery_midconversation,
     case_injection_in_live_search,
+    case_image_tools,
 ])
 
 

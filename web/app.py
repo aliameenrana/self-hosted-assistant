@@ -30,11 +30,14 @@ from core.personas import PERSONAS
 from core.tools import WEB_TOOLS
 from core.tool_router import ToolRouter
 from core.tools.memory_tools import build as build_memory_tools
+from core.tools.image_tools import build as build_image_tools
 from web import auth
 
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
 QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
 SLOTS = int(os.getenv("PARALLEL_SLOTS", "2"))
+ARTIFACT_TOOLS = {"create_webpage", "crop_image", "resize_image",
+                  "convert_image_format", "set_image_transparency"}
 
 log = logging.getLogger("app")
 
@@ -138,6 +141,14 @@ class Ask(BaseModel):
 # disk, so a malicious file leaves nothing behind after parsing.
 _attachments: dict[str, object] = {}
 
+# Images are held separately from text attachments and are NOT popped on
+# first use: a document is read once and its text folded into context, but
+# an image is something tools act on repeatedly across a conversation (crop,
+# then resize the result, ...), so it has to survive more than one message.
+_images: dict[str, bytes] = {}
+IMAGE_KINDS = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp"}
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
+
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...), request: Request = None):
@@ -146,6 +157,19 @@ async def upload(file: UploadFile = File(...), request: Request = None):
         raise HTTPException(429, f"slow down, try again in {retry_after}s",
                             headers={"Retry-After": str(retry_after)})
     data = await file.read()
+    content_type = (file.content_type or "").split(";")[0]
+    if content_type in IMAGE_KINDS:
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(400, f"image too large, limit "
+                                f"{MAX_IMAGE_BYTES // 1024 // 1024}MB")
+        key = uuid.uuid4().hex
+        _images[key] = data
+        if len(_images) > 200:
+            for stale in list(_images)[:50]:
+                _images.pop(stale, None)
+        return {"id": key, "name": file.filename or "image",
+                "kind": IMAGE_KINDS[content_type], "is_image": True,
+                "chars": len(data), "pages": 0, "truncated": False}
     try:
         doc = extract(data, file.filename or "file", file.content_type or "")
     except DocumentError as exc:
@@ -270,6 +294,15 @@ async def chat(ask: Ask, request: Request):
     doc = _attachments.pop(ask.attachment, None) if ask.attachment else None
     if doc:
         history = history + [{"role": "system", "content": doc.as_context()}]
+    # Images are not popped here (see _images comment above): the tool
+    # calls, not this handler, are what consume them, and they may be
+    # referenced again in a later message in the same conversation.
+    if ask.attachment and ask.attachment in _images:
+        history = history + [{"role": "system", "content":
+            f"The user has attached an image, id {ask.attachment!r}. Use "
+            "crop_image, resize_image, convert_image_format, or "
+            "set_image_transparency with this id if they ask you to edit "
+            "it, now or in a later message in this conversation."}]
     question = ask.message
     if switched_from:
         history.append({"role": "system", "content":
@@ -290,7 +323,8 @@ async def chat(ask: Ask, request: Request):
                 # model cannot reach another user's history.
                 harness.registry = {
                     **WEB_TOOLS,
-                    **build_memory_tools(memory, session, owner)}
+                    **build_memory_tools(memory, session, owner),
+                    **build_image_tools(_images.get)}
                 harness.router = ToolRouter(harness.registry)
                 harness.episodic = episodic
                 harness.procedural = procedural
@@ -337,7 +371,7 @@ async def chat(ask: Ask, request: Request):
                                         "facts": len(ctx.long),
                                         "summary": bool(ctx.short)},
                             "artifacts": [c.result for c in tel.tool_calls
-                                          if c.name == "create_webpage"
+                                          if c.name in ARTIFACT_TOOLS
                                           and c.outcome == "ok"],
                             "tools": [{"name": c.name, "outcome": c.outcome,
                                        "retries": c.retries, "ms": c.ms}
@@ -404,21 +438,31 @@ def _persist(session: str, question: str, answer: str, tel) -> None:
 
 
 ARTIFACTS = Path("data/artifacts")
+ARTIFACT_MEDIA_TYPES = {"html": "text/html", "png": "image/png",
+                        "jpg": "image/jpeg", "webp": "image/webp"}
 
 
 @app.get("/artifacts/{name}")
 def artifact(name: str):
-    # Model-authored HTML. Sandboxed at write time and served with a
-    # restrictive CSP, no same-origin access to the app.
-    if not re.fullmatch(r"[a-z0-9-]+\.html", name):
+    m = re.fullmatch(r"([a-z0-9-]+)\.(html|png|jpg|webp)", name)
+    if not m:
         raise HTTPException(404, "no")
+    ext = m.group(2)
     path = ARTIFACTS / name
     if not path.is_file():
         raise HTTPException(404, "no such page")
-    return FileResponse(path, media_type="text/html", headers={
-        "Content-Security-Policy":
-            "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
-            "font-src data:; sandbox allow-popups",
+    if ext == "html":
+        # Model-authored HTML. Sandboxed at write time and served with a
+        # restrictive CSP, no same-origin access to the app.
+        return FileResponse(path, media_type="text/html", headers={
+            "Content-Security-Policy":
+                "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+                "font-src data:; sandbox allow-popups",
+            "X-Content-Type-Options": "nosniff"})
+    # Images have no script context to sandbox, but keep them from being
+    # framed or sniffed as something else regardless.
+    return FileResponse(path, media_type=ARTIFACT_MEDIA_TYPES[ext], headers={
+        "Content-Security-Policy": "default-src 'none'",
         "X-Content-Type-Options": "nosniff"})
 
 

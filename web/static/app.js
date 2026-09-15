@@ -3,6 +3,7 @@ const log = $("log"), hello = $("hello"), scroll = $("scroll");
 const input = $("q"), send = $("send"), who = $("who");
 
 let session = null, me = null, busy = false, attachment = null, controller = null;
+let attachmentIsImage = false;
 let lastModel = null;
 
 // Each one exercises a real tool call end to end, chosen because they
@@ -84,6 +85,10 @@ const STATUS_LABEL = {
   read_repo: "reading the repo",
   search_memory: "checking earlier in this chat",
   remember_fact: "noting that down",
+  crop_image: "cropping the image",
+  resize_image: "resizing the image",
+  convert_image_format: "converting the image",
+  set_image_transparency: "adjusting transparency",
 };
 
 function thinking(bubble, label) {
@@ -203,11 +208,15 @@ function meta(row, t) {
 function artifact(row, a) {
   const box = document.createElement("div");
   box.className = "artifact";
-  box.innerHTML = `<div class="abar"><b></b><a target="_blank">open ↗</a></div>
-    <iframe sandbox="allow-popups" loading="lazy"></iframe>`;
-  box.querySelector("b").textContent = a.title;
+  const isImage = /\.(png|jpg|webp)$/i.test(a.url);
+  box.innerHTML = isImage
+    ? `<div class="abar"><b></b><a target="_blank">open ↗</a></div>
+       <img loading="lazy">`
+    : `<div class="abar"><b></b><a target="_blank">open ↗</a></div>
+       <iframe sandbox="allow-popups" loading="lazy"></iframe>`;
+  box.querySelector("b").textContent = a.title || "image";
   box.querySelector("a").href = a.url;
-  box.querySelector("iframe").src = a.url;
+  box.querySelector(isImage ? "img" : "iframe").src = a.url;
   row.append(box);
   at();
 }
@@ -236,8 +245,18 @@ $("file").onchange = async e => {
     attachment = null;
   } else {
     attachment = d.id;
-    const size = d.pages ? `${d.pages} pages` : `${(d.chars / 1000).toFixed(1)}k chars`;
-    box.innerHTML = `📄 <b>${esc(d.name)}</b> ${size}${d.truncated ? ", truncated" : ""}`;
+    attachmentIsImage = !!d.is_image;
+    const size = d.is_image ? `${(d.chars / 1024).toFixed(0)}kb`
+                : d.pages ? `${d.pages} pages`
+                : `${(d.chars / 1000).toFixed(1)}k chars`;
+    const icon = d.is_image ? "🖼️" : "📄";
+    box.innerHTML = `${icon} <b>${esc(d.name)}</b> ${size}${d.truncated ? ", truncated" : ""}`;
+    if (d.is_image) {
+      const hint = document.createElement("span");
+      hint.className = "hint";
+      hint.textContent = " (stays attached until you remove it)";
+      box.append(hint);
+    }
     const x = document.createElement("button");
     x.textContent = "remove";
     x.onclick = clearAttachment;
@@ -248,6 +267,7 @@ $("file").onchange = async e => {
 };
 
 function clearAttachment() {
+  attachmentIsImage = false;
   attachment = null;
   $("attached").hidden = true;
   $("attached").innerHTML = "";
@@ -266,8 +286,12 @@ $("f").onsubmit = async e => {
   controller = new AbortController();
 
   const label = attachment ? $("attached").querySelector("b").textContent : null;
-  turn("you", label ? `📄 ${label}\n${text}` : text);
-  clearAttachment();
+  const icon = attachmentIsImage ? "🖼️" : "📄";
+  turn("you", label ? `${icon} ${label}\n${text}` : text);
+  // An image stays attached across messages (crop, then resize the same
+  // original) since the backend does not pop it on first use, unlike a
+  // text document. Only clear it here for the non-image case.
+  if (!attachmentIsImage) clearAttachment();
   const { row, bubble } = turn("them", "");
   thinking(bubble);
 
