@@ -9,7 +9,7 @@ import socket
 
 import httpx
 
-from .artifacts import create_page
+from .artifacts import create_page, edit_page
 from ..sanitize import defang
 
 
@@ -358,6 +358,13 @@ def _create_webpage(title: str, html: str) -> dict[str, Any]:
         raise ToolError(str(exc)) from exc
 
 
+def _edit_webpage(page_id: str, title: str, html: str) -> dict[str, Any]:
+    try:
+        return edit_page(page_id, title, html)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 WEB_TOOLS: dict[str, Tool] = {
     t.name: t
     for t in [
@@ -437,16 +444,35 @@ WEB_TOOLS: dict[str, Tool] = {
                   ["repo"]), _read_repo),
         Tool("create_webpage",
              "Publish a complete HTML page and get back a link the user can "
-             "open. Use when asked to build, make, or design a page, site, "
-             "dashboard, chart, game, or any visual artifact. Write the whole "
-             "document with inline CSS. Do not use for code the user wants to "
-             "read rather than view, or for plain text answers.",
+             "open, plus a page_id. Use when asked to build, make, or design "
+             "a page, site, dashboard, chart, game, or any visual artifact. "
+             "Write the whole document with inline CSS. If the user asks to "
+             "change something about a page you already built in this "
+             "conversation, use edit_webpage with that page_id instead of "
+             "calling this again, which would make an unrelated second page. "
+             "Do not use for code the user wants to read rather than view, "
+             "or for plain text answers.",
              _obj({"title": {"type": "string",
                              "description": "Short name for the page."},
                    "html": {"type": "string",
                             "description": "Complete HTML document with inline "
                                            "<style>. No external files."}},
                   ["title", "html"]), _create_webpage, budget=3000),
+        Tool("edit_webpage",
+             "Replace the content of a page you already built in this "
+             "conversation, in place, using the page_id create_webpage "
+             "returned. Use this instead of create_webpage whenever the "
+             "user asks to change, fix, or add to a page rather than build "
+             "a new unrelated one. Supply the COMPLETE new HTML document, "
+             "not just the changed part.",
+             _obj({"page_id": {"type": "string",
+                               "description": "The page_id from when the "
+                                              "page was created."},
+                   "title": {"type": "string"},
+                   "html": {"type": "string",
+                            "description": "Complete replacement HTML "
+                                           "document with inline <style>."}},
+                  ["page_id", "title", "html"]), _edit_webpage, budget=3000),
     ]
 }
 

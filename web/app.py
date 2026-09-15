@@ -37,7 +37,7 @@ from web import auth
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
 QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
 SLOTS = int(os.getenv("PARALLEL_SLOTS", "2"))
-ARTIFACT_TOOLS = {"create_webpage", "crop_image", "resize_image",
+ARTIFACT_TOOLS = {"create_webpage", "edit_webpage", "crop_image", "resize_image",
                   "convert_image_format", "set_image_transparency"}
 
 

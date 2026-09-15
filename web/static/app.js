@@ -80,6 +80,7 @@ const STATUS_LABEL = {
   get_datetime: "checking the time",
   convert_units: "converting",
   create_webpage: "building the page",
+  edit_webpage: "updating the page",
   extract_structured: "reading the file",
   diff_text: "comparing",
   read_repo: "reading the repo",

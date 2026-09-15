@@ -470,6 +470,58 @@ def case_csv_tools():
     return not problems
 
 
+def case_webpage_edit():
+    """A page built, then edited, guards that edit_webpage overwrites the
+    SAME artifact (same page_id, same URL) rather than create_webpage
+    getting called again and producing a second unrelated page - the
+    exact gap that made "now change X" impossible before edit_webpage
+    existed, since a content-hash filename had no notion of "this page,
+    again" to target."""
+    def verify(replies, tels):
+        problems = []
+        create_tools = [x["name"] for x in tels[0]["tools"]]
+        if "create_webpage" not in create_tools:
+            problems.append("did not call create_webpage on the first ask")
+        arts0 = tels[0].get("artifacts") or []
+        if not arts0:
+            problems.append("no artifact returned from create_webpage")
+            return problems
+        page_id = arts0[0].get("page_id")
+        url0 = arts0[0].get("url")
+
+        edit_tools = [x["name"] for x in tels[1]["tools"]]
+        if "edit_webpage" not in edit_tools:
+            problems.append("did not call edit_webpage on the follow-up, "
+                            "likely called create_webpage again instead")
+        arts1 = tels[1].get("artifacts") or []
+        if not arts1:
+            problems.append("no artifact returned from edit_webpage")
+        elif arts1[0].get("url") != url0 or arts1[0].get("page_id") != page_id:
+            problems.append(f"edit produced a DIFFERENT page "
+                            f"({arts1[0].get('url')!r}) instead of "
+                            f"overwriting {url0!r}")
+        if tels[1].get("flags"):
+            problems.append(f"fabrication flags on edit: {tels[1]['flags']}")
+        return problems
+
+    s = Session()
+    replies, tels = [], []
+    for msg in ["make me a one page site for a coffee shop called Bean "
+               "There, with a red header",
+               "change the header color to blue instead, keep everything "
+               "else the same"]:
+        text, tel = s.ask(msg)
+        replies.append(text)
+        tels.append(tel)
+    problems = verify(replies, tels)
+    mark = "FAIL" if problems else "ok  "
+    print(f"{mark} webpage_edit (edit overwrites the same artifact, not a "
+         "new unrelated one)")
+    for p in problems:
+        print(f"      {p}")
+    return not problems
+
+
 CASES.extend([
     case_multihop_chaining,
     case_single_step_not_overchained,
@@ -480,6 +532,7 @@ CASES.extend([
     case_injection_in_live_search,
     case_image_tools,
     case_csv_tools,
+    case_webpage_edit,
 ])
 
 
