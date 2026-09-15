@@ -12,6 +12,14 @@ from .tools import ToolError
 from .tools.registry import RELEVANCE_CHECKED, Tool, execute
 
 
+def _is_malformed_tool_call(resp: httpx.Response) -> bool:
+    try:
+        err = resp.json().get("error", {}).get("message", "")
+    except ValueError:
+        return False
+    return "Failed to parse tool call arguments" in err
+
+
 @dataclass
 class ToolCall:
     name: str
@@ -37,21 +45,38 @@ def _recap(history: list[dict]) -> str:
     became invisible to every later turn in the same conversation: asked
     "what is the date" then "is June in the past", the second question had
     no access to the first answer at all and the model invented a year.
+
+    Each fact is labelled with the question that was live when it was
+    fetched, not dumped as one unscoped pool. Flat "still true now" facts
+    read fine when a session stays on one topic, but a genuine topic switch
+    (ask about the Olympics, then ask about a car) let the model blend a
+    fact from the old topic into the new answer, since nothing marked the
+    facts as belonging to a different question than the one being asked now.
     """
     asks = [m["content"].strip().replace("\n", " ")[:90]
             for m in history if m.get("role") == "user"][-4:]
-    tool_facts = [m["content"] for m in history
-                 if m.get("role") == "assistant"
-                 and m["content"].startswith("[tool]")][-6:]
+    labelled = []
+    current_ask = None
+    for m in history:
+        if m.get("role") == "user":
+            current_ask = m["content"].strip().replace("\n", " ")[:90]
+        elif (m.get("role") == "assistant"
+              and m["content"].startswith("[tool]")):
+            labelled.append((current_ask, m["content"]))
+    labelled = labelled[-6:]
     system = [m["content"] for m in history if m.get("role") == "system"]
     parts = []
     if asks:
         parts.append("Earlier in this conversation the user asked about: "
                      + "; ".join(asks))
-    if tool_facts:
+    if labelled:
+        lines = "\n".join(
+            f'- for the earlier question "{ask}": {fact}' if ask else fact
+            for ask, fact in labelled)
         parts.append("Facts already established earlier in this conversation, "
-                     "still true now unless the user says otherwise:\n"
-                     + "\n".join(tool_facts))
+                     "each still true for ITS OWN question but only relevant "
+                     "now if the current question is asking about the same "
+                     "thing:\n" + lines)
     parts.extend(system)
     return "\n\n".join(parts)
 
@@ -120,6 +145,48 @@ def _relevance(query: str, result: Any) -> float:
     return hit / len(q)
 
 
+def _search_is_boilerplate(result: Any) -> bool:
+    """search_web can be on-topic (every snippet mentions the repo/subject,
+    so _relevance scores it fine) and still contain zero actual answer, when
+    every result is the same repo tagline or page blurb repeated. Found
+    live: "what license does ggml-org/llama.cpp use" got 6 results, several
+    of them variants of "LLM inference in C/C++", none containing
+    MIT/Apache/BSD/etc, and the model filled the gap by guessing from stale
+    training data (got it wrong once in 13 eval runs). A short-circuit to
+    the voice pass after one on-topic-but-empty search is indistinguishable
+    from a genuinely answered one unless something checks for actual
+    substance, not just topic match.
+
+    Deliberately narrow: catches literal repeated boilerplate only. A more
+    general "does this snippet actually contain new information" check was
+    tried and dropped - capitalized phrases and digit counts turned out to
+    be noise (view counts, dates, generic bigrams like "Local LLM") far more
+    often than they were the answer, so it either flagged almost nothing or
+    almost everything depending on the threshold. DuckDuckGo scraping is
+    also noisy enough that the same query can come back thin on one call
+    and with the answer stated plainly on the next, so this reduces how
+    often the model guesses from a thin result, it does not eliminate it.
+    The remaining gap is covered by a TOOL_PROMPT instruction telling the
+    model to read_url the source page when a result looks like titles
+    rather than an answer.
+    """
+    if not isinstance(result, dict) or "results" not in result:
+        return False
+    snippets = [r.get("snippet", "").strip().lower()
+               for r in result["results"] if r.get("snippet")]
+    # Below 3, one incidental match against the first snippet's own prefix
+    # is already 50%, a false positive on the sample-size boundary rather
+    # than a real duplication signal.
+    if len(snippets) < 3:
+        return False
+    first_words = snippets[0].split()[:6]
+    if not first_words:
+        return False
+    prefix = " ".join(first_words)
+    duplicates = sum(1 for s in snippets if s.startswith(prefix))
+    return duplicates / len(snippets) >= 0.5
+
+
 def _is_empty(result: Any) -> bool:
     """Structurally valid but semantically useless. Agents over-trust these."""
     if result is None:
@@ -151,7 +218,7 @@ class Telemetry:
 class Harness:
     def __init__(self, base_url: str, model: str, registry: dict[str, Tool],
                  max_turns: int = 6, max_retries: int = 2,
-                 decide_tokens: int = 64, continuation_tokens: int = 400):
+                 decide_tokens: int = 128, continuation_tokens: int = 400):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.registry = registry
@@ -169,7 +236,19 @@ class Harness:
                     max_tokens: int | None = None, force: bool = False,
                     slot_id: int | None = None) -> Any:
         body: dict[str, Any] = {"model": self.model, "messages": messages,
-                                "stream": stream, "cache_prompt": True}
+                                "stream": stream, "cache_prompt": True,
+                                # This is always the tool-decision pass (the
+                                # voice pass streams through its own request
+                                # below, never through here). Qwen3 thinks by
+                                # default, and its reasoning preamble alone
+                                # burned the entire decide-token budget before
+                                # a single tool-call token was emitted, so the
+                                # call truncated mid-JSON every time and
+                                # llama.cpp's parser reported that as a 500.
+                                # Turning thinking off for this pass is the
+                                # actual fix; the budget only needs to cover
+                                # the call itself now.
+                                "chat_template_kwargs": {"enable_thinking": False}}
         if slot_id is not None:
             body["id_slot"] = slot_id
         if max_tokens:
@@ -179,6 +258,12 @@ class Harness:
             body["tool_choice"] = "required" if force else "auto"
         resp = await client.post(f"{self.base_url}/v1/chat/completions", json=body,
                                  timeout=180.0)
+        if resp.status_code == 500 and _is_malformed_tool_call(resp):
+            # Belt and suspenders: an occasional genuinely truncated call can
+            # still happen near the budget edge. One retry recovers those;
+            # it no longer masks the systematic case above.
+            resp = await client.post(f"{self.base_url}/v1/chat/completions",
+                                     json=body, timeout=180.0)
         resp.raise_for_status()
         return resp.json()
 
@@ -360,6 +445,9 @@ class Harness:
                         payload["next_step"] = (
                             f"{name} has failed {attempts[name]} times. Stop calling "
                             "it. Answer without it and say plainly that it failed.")
+                elif payload.get("note"):
+                    tel.trace.append(f"  -> ok but thin: "
+                                     f"{_summarise_result(name, payload.get('result'))}")
                 else:
                     tel.trace.append(f"  -> ok: {_summarise_result(name, payload.get('result'))}")
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
@@ -440,6 +528,23 @@ class Harness:
                         "error": f"{name} returned results with no overlap "
                                  "with the query, likely off-topic"}
 
+        if name == "search_web" and _search_is_boilerplate(result):
+            # On-topic (passes _relevance) but every snippet is the same
+            # repo/page tagline repeated, so there is no actual answer here
+            # to hand off. Still "ok" (the search itself worked and the
+            # result is real, worth showing), but flagged so the multi-part
+            # gate below does not treat one search as a finished answer and
+            # skip straight to the voice pass on a guess.
+            tel.tool_calls.append(ToolCall(name, args, "thin", result=result,
+                                           ms=elapsed()))
+            urls = [r.get("url") for r in result.get("results", [])[:3]
+                   if r.get("url")]
+            return {"result": result,
+                    "note": "these results are repo/page titles, not an "
+                            "answer. If the question needs a specific fact "
+                            "(a license name, a version, a number), call "
+                            f"read_url on the most relevant one of: {urls}"}
+
         tel.tool_calls.append(ToolCall(name, args, "ok", result=result, ms=elapsed()))
         return {"result": result}
 
@@ -488,7 +593,15 @@ class Harness:
 
             body = {"model": self.model, "messages": messages, "stream": True,
                     "cache_prompt": True, "max_tokens": VOICE_MAX_TOKENS,
-                    "stop": STOP}
+                    "stop": STOP,
+                    # voice_prompt() already asks for no-think via the /no_think
+                    # text marker, but that marker turned out not to be honored
+                    # by this template (found while chasing a tool-decision
+                    # bug where the same marker silently did nothing). This is
+                    # the API-level switch that is actually verified to work,
+                    # so the think-mode A/B already measured for this pass
+                    # (voice_prompt's docstring above) takes effect for real.
+                    "chat_template_kwargs": {"enable_thinking": False}}
             if slot_id is not None:
                 body["id_slot"] = slot_id
             first = True

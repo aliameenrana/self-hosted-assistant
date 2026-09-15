@@ -223,14 +223,20 @@ RELEVANCE_CHECKED = {"search_web", "read_url", "read_repo"}
 
 class Tool:
     def __init__(self, name: str, description: str, params: dict, fn: Callable,
-                 budget: int = 64):
+                 budget: int = 160):
         self.name = name
         self.description = description
         self.params = params
         self.fn = fn
         # Tokens pass 1 needs to emit the call. Tools whose arguments carry
-        # content need far more; 64 truncates them mid-JSON and the failure is
-        # then misdiagnosed as the model producing invalid JSON.
+        # content need far more; 64 truncated even a short free-text query
+        # (name, JSON scaffolding, and a search string like "Koenigsegg
+        # Agera engine horsepower top speed" alone runs past it) mid-string,
+        # which llama.cpp's tool-call parser reports as a 500 rather than a
+        # bad completion, misdiagnosed as the model producing invalid JSON
+        # or the server being down. Tools with genuinely large payloads
+        # (extract_structured, diff_text, create_webpage) still override
+        # this explicitly.
         self.budget = budget
 
     def schema(self) -> dict[str, Any]:

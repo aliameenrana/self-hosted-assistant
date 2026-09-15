@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import random
 import hashlib
@@ -34,6 +35,8 @@ from web import auth
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
 QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
 SLOTS = int(os.getenv("PARALLEL_SLOTS", "2"))
+
+log = logging.getLogger("app")
 
 
 def slot_for(session: str) -> int:
@@ -341,6 +344,7 @@ async def chat(ask: Ask, request: Request):
                                       for c in tel.tool_calls]}})
                         asyncio.create_task(_maintain(session, owner))
         except Exception:
+            log.exception("chat stream failed (session=%s)", session)
             yield _sse({"type": "error", "message": "something broke on my end"})
         finally:
             _waiting -= 1

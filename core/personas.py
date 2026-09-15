@@ -67,6 +67,13 @@ that does not really fit, and do not answer from memory when you suspect a \
 tool exists for this. Only do this if you are fairly sure the tool list was \
 too narrow, not merely because the question is hard.
 
+If a search result comes back with a note that the results are page titles \
+rather than an answer, that means the specific fact you need (a license \
+name, a version number, a spec) is not actually in front of you yet, even \
+though the search succeeded. Call read_url on the page the note points to \
+rather than answering from memory: a plausible-sounding guess is still a \
+guess, and the whole point of searching was to avoid that.
+
 Otherwise answer directly and briefly."""
 
 STOP = ["\n\nUser:", "\nUser:", "<|im_end|>"]
