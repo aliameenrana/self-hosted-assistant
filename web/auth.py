@@ -18,6 +18,7 @@ REDIRECT = os.getenv("OAUTH_REDIRECT", "http://localhost:8000/auth/callback")
 
 router = APIRouter()
 _states: dict[str, str] = {}
+MAX_STATES = 500
 
 
 def enabled() -> bool:
@@ -30,6 +31,10 @@ def start(request: Request):
         raise HTTPException(503, "google sign-in is not configured")
     state = secrets.token_urlsafe(24)
     _states[state] = request.cookies.get("uid", "anon")
+    # Drop the oldest half if abandoned logins piled up with no callback.
+    if len(_states) > MAX_STATES:
+        for stale in list(_states)[:MAX_STATES // 2]:
+            _states.pop(stale, None)
     params = urllib.parse.urlencode({
         "client_id": CLIENT_ID, "redirect_uri": REDIRECT, "response_type": "code",
         "scope": "openid email", "state": state, "prompt": "select_account"})

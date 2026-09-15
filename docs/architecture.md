@@ -106,17 +106,19 @@ prompt instruction.** It is the answer to priority 2.
 - **A failed tool is reported to the voice layer as failed.** Never omitted,
   never softened. The persona then says so, in character, briefly.
 
-### Tools (v1, all read-only)
+### Tools (grown past v1; see docs/tool-catalogue.md for the current list)
 
-`web_search`, `fetch_url` (allowlist + size cap), `datetime`, `calculator`.
+v1 was read-only: `search_web`, `read_url` (SSRF-blocked, not allowlisted),
+`get_datetime`, `calculate`. The registry has since grown to include tools
+that write files (create_webpage, image edits, CSV export), each with its
+own scoped write path rather than open filesystem or shell access.
 
-No shell. No filesystem writes. No arbitrary network. Read-only is the security
-boundary; the system prompt is not a security boundary. Strangers steer these.
+No shell. No arbitrary network beyond the SSRF guard. The system prompt is
+not a security boundary. Strangers steer these.
 
-### Persona Selection
+### Persona
 
-Rolled once at session start, held for the run. Or user-picked from the five.
-Stored on the session row. Never reshuffles mid-conversation.
+One persona now, not five. See core/personas.py.
 
 ---
 

@@ -18,7 +18,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from .registry import ToolError
+from .errors import ToolError
 
 DIR = Path("data/artifacts")
 MAX_BYTES = 8 * 1024 * 1024

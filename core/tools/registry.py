@@ -10,11 +10,9 @@ import socket
 import httpx
 
 from .artifacts import create_page, edit_page
+from .errors import ToolError
 from ..sanitize import defang
 
-
-class ToolError(Exception):
-    pass
 
 
 # An allowlist of three domains was correct when nothing produced URLs. Now
@@ -351,18 +349,6 @@ def _obj(props: dict, required: list[str]) -> dict:
             "additionalProperties": False}
 
 
-def _create_webpage(title: str, html: str) -> dict[str, Any]:
-    try:
-        return create_page(title, html)
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
-
-
-def _edit_webpage(page_id: str, title: str, html: str) -> dict[str, Any]:
-    try:
-        return edit_page(page_id, title, html)
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
 
 
 WEB_TOOLS: dict[str, Tool] = {
@@ -457,7 +443,7 @@ WEB_TOOLS: dict[str, Tool] = {
                    "html": {"type": "string",
                             "description": "Complete HTML document with inline "
                                            "<style>. No external files."}},
-                  ["title", "html"]), _create_webpage, budget=3000),
+                  ["title", "html"]), create_page, budget=3000),
         Tool("edit_webpage",
              "Replace the content of a page you already built in this "
              "conversation, in place, using the page_id create_webpage "
@@ -472,7 +458,7 @@ WEB_TOOLS: dict[str, Tool] = {
                    "html": {"type": "string",
                             "description": "Complete replacement HTML "
                                            "document with inline <style>."}},
-                  ["page_id", "title", "html"]), _edit_webpage, budget=3000),
+                  ["page_id", "title", "html"]), edit_page, budget=3000),
     ]
 }
 

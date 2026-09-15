@@ -16,6 +16,8 @@ import secrets
 import time
 from pathlib import Path
 
+from .errors import ToolError
+
 DIR = Path("data/artifacts")
 MAX_BYTES = 400_000
 
@@ -37,9 +39,9 @@ def sanitise(html: str) -> tuple[str, int]:
 
 def _finalise(title: str, html: str) -> tuple[str, int]:
     if not html.strip():
-        raise ValueError("html was empty")
+        raise ToolError("html was empty")
     if len(html.encode()) > MAX_BYTES:
-        raise ValueError(f"page too large, limit {MAX_BYTES} bytes")
+        raise ToolError(f"page too large, limit {MAX_BYTES} bytes")
     cleaned, stripped = sanitise(html)
     if "<html" not in cleaned.lower():
         cleaned = (f"<!doctype html><html><head><meta charset=utf-8>"
@@ -68,10 +70,10 @@ def edit_page(page_id: str, title: str, html: str) -> dict:
     from a URL, so this can never be used to write to an id that was never
     actually allocated by this tool."""
     if not re.fullmatch(r"[0-9a-f]{16}", page_id):
-        raise ValueError("not a page id this tool ever issued")
+        raise ToolError("not a page id this tool ever issued")
     path = DIR / f"{page_id}.html"
     if not path.is_file():
-        raise ValueError(f"no page with id {page_id!r}. It may have expired "
+        raise ToolError(f"no page with id {page_id!r}. It may have expired "
                          "or never existed - create a new one instead.")
     cleaned, stripped = _finalise(title, html)
     path.write_text(cleaned, encoding="utf-8")

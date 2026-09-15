@@ -32,6 +32,8 @@ from core.tool_router import ToolRouter
 from core.tools.memory_tools import build as build_memory_tools
 from core.tools.image_tools import build as build_image_tools
 from core.tools.csv_tools import build as build_csv_tools
+from core.tools.images import MAX_INPUT_BYTES as MAX_IMAGE_BYTES
+from core.tools.csvs import MAX_BYTES as MAX_CSV_BYTES
 from web import auth
 
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
@@ -153,25 +155,51 @@ class Ask(BaseModel):
     attachment: str | None = None
 
 
-# Extracted text lives in memory only. Uploaded bytes are never written to
-# disk, so a malicious file leaves nothing behind after parsing.
-_attachments: dict[str, object] = {}
-
-# Images and CSVs are held separately from text attachments and are NOT
-# popped on first use: a document is read once and its text folded into
-# context, but both of these are things tools act on repeatedly across a
-# conversation (crop an image then resize the result, filter a CSV then
-# query it another way), so they have to survive more than one message.
-_images: dict[str, bytes] = {}
-_csvs: dict[str, bytes] = {}
+# Every entry is (owner, value, last_used). Owner is checked on every read
+# so an attachment id leaked through a shared device, a proxy log, or a
+# browser history entry cannot be used by a different uid to read or edit
+# someone else's upload - the id alone was previously sufficient, which is
+# the same class of gap sessions were already protected against below.
+# Eviction is by last_used, not insertion order: an id actively being
+# reused across turns (crop, then resize the same image) must not be the
+# one that gets dropped just because other uploads came in after it.
+_attachments: dict[str, tuple[str, object, float]] = {}
+_images: dict[str, tuple[str, bytes, float]] = {}
+_csvs: dict[str, tuple[str, bytes, float]] = {}
 IMAGE_KINDS = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp"}
-MAX_IMAGE_BYTES = 12 * 1024 * 1024
-MAX_CSV_BYTES = 8 * 1024 * 1024
+MAX_STORED = 200
+EVICT_TO = 150
+
+
+def _store_put(store: dict, key: str, owner: str, value) -> None:
+    store[key] = (owner, value, time.time())
+    if len(store) > MAX_STORED:
+        by_age = sorted(store, key=lambda k: store[k][2])
+        for stale in by_age[:len(store) - EVICT_TO]:
+            store.pop(stale, None)
+
+
+def _store_get(store: dict, key: str, owner: str):
+    """Returns the value only if this owner is the one who stored it, and
+    refreshes last_used so an id still in active use survives eviction."""
+    entry = store.get(key)
+    if entry is None or entry[0] != owner:
+        return None
+    store[key] = (owner, entry[1], time.time())
+    return entry[1]
+
+
+def _store_pop(store: dict, key: str, owner: str):
+    entry = store.get(key)
+    if entry is None or entry[0] != owner:
+        return None
+    return store.pop(key)[1]
 
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...), request: Request = None):
-    allowed, retry_after = ratelimit.check(owner_of(request))
+    owner = owner_of(request)
+    allowed, retry_after = ratelimit.check(owner)
     if not allowed:
         raise HTTPException(429, f"slow down, try again in {retry_after}s",
                             headers={"Retry-After": str(retry_after)})
@@ -183,10 +211,7 @@ async def upload(file: UploadFile = File(...), request: Request = None):
             raise HTTPException(400, f"image too large, limit "
                                 f"{MAX_IMAGE_BYTES // 1024 // 1024}MB")
         key = uuid.uuid4().hex
-        _images[key] = data
-        if len(_images) > 200:
-            for stale in list(_images)[:50]:
-                _images.pop(stale, None)
+        _store_put(_images, key, owner, data)
         return {"id": key, "name": filename,
                 "kind": IMAGE_KINDS[content_type], "is_image": True,
                 "chars": len(data), "pages": 0, "truncated": False}
@@ -200,10 +225,7 @@ async def upload(file: UploadFile = File(...), request: Request = None):
             raise HTTPException(400, f"file too large, limit "
                                 f"{MAX_CSV_BYTES // 1024 // 1024}MB")
         key = uuid.uuid4().hex
-        _csvs[key] = data
-        if len(_csvs) > 200:
-            for stale in list(_csvs)[:50]:
-                _csvs.pop(stale, None)
+        _store_put(_csvs, key, owner, data)
         return {"id": key, "name": filename, "kind": "csv", "is_csv": True,
                 "chars": len(data), "pages": 0, "truncated": False}
     try:
@@ -211,10 +233,7 @@ async def upload(file: UploadFile = File(...), request: Request = None):
     except DocumentError as exc:
         raise HTTPException(400, str(exc))
     key = uuid.uuid4().hex
-    _attachments[key] = doc
-    if len(_attachments) > 200:
-        for stale in list(_attachments)[:50]:
-            _attachments.pop(stale, None)
+    _store_put(_attachments, key, owner, doc)
     return {"id": key, "name": doc.name, "kind": doc.kind,
             "pages": doc.pages, "chars": len(doc.text),
             "truncated": doc.truncated}
@@ -327,14 +346,15 @@ async def chat(ask: Ask, request: Request):
 
     ctx = memory.load(session, owner)
     history = ctx.as_messages()
-    doc = _attachments.pop(ask.attachment, None) if ask.attachment else None
+    doc = (_store_pop(_attachments, ask.attachment, owner)
+          if ask.attachment else None)
     if doc:
         history = history + [{"role": "system", "content": doc.as_context()}]
-    # Images and CSVs are not popped here (see _images/_csvs comment above):
+    # Images and CSVs are not popped here (see _store_put/_store_get above):
     # the tool calls, not this handler, are what consume them, and they may
     # be referenced again in a later message in the same conversation.
     force_tools: list[str] = []
-    if ask.attachment and ask.attachment in _images:
+    if ask.attachment and _store_get(_images, ask.attachment, owner) is not None:
         history = history + [{"role": "system", "content":
             f"The user has attached an image, id {ask.attachment!r}. Use "
             "crop_image, resize_image, convert_image_format, or "
@@ -342,7 +362,7 @@ async def chat(ask: Ask, request: Request):
             "it, now or in a later message in this conversation."}]
         force_tools += ["crop_image", "resize_image",
                         "convert_image_format", "set_image_transparency"]
-    if ask.attachment and ask.attachment in _csvs:
+    if ask.attachment and _store_get(_csvs, ask.attachment, owner) is not None:
         history = history + [{"role": "system", "content":
             f"The user has attached a CSV, id {ask.attachment!r}. Call "
             "summarize_csv with this id FIRST to see the real column "
@@ -370,8 +390,10 @@ async def chat(ask: Ask, request: Request):
                 harness.registry = {
                     **WEB_TOOLS,
                     **build_memory_tools(memory, session, owner),
-                    **build_image_tools(_images.get),
-                    **build_csv_tools(_csvs.get)}
+                    **build_image_tools(
+                        lambda k: _store_get(_images, k, owner)),
+                    **build_csv_tools(
+                        lambda k: _store_get(_csvs, k, owner))}
                 harness.router = ToolRouter(harness.registry)
                 harness.episodic = episodic
                 harness.procedural = procedural

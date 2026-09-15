@@ -18,7 +18,7 @@ from typing import Any
 
 from PIL import Image
 
-from .registry import ToolError
+from .errors import ToolError
 
 DIR = Path("data/artifacts")
 MAX_INPUT_BYTES = 12 * 1024 * 1024
