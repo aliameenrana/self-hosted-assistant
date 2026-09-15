@@ -9,10 +9,9 @@ let lastModel = null;
 // Each one exercises a real tool call end to end, chosen because they
 // demonstrated the system honestly rather than because they look impressive.
 const SUGGESTIONS = [
-  ["🧮", "exact math", "what is 4871 times 392"],
-  ["🔎", "live search", "who won the last super bowl"],
+  ["💼", "real job search", "search for fullstack developer jobs in Lahore Pakistan, then read the most relevant result and list the actual job titles and companies you find"],
+  ["🔎", "search, then compute", "search for the current gold price per ounce, then calculate what 15 ounces would cost"],
   ["🎨", "build a page", "make me a landing page for a dog walking business"],
-  ["📄", "read a file", "attach a CV and ask what is weak"],
 ];
 
 const at = () => scroll.scrollTo({ top: scroll.scrollHeight, behavior: "smooth" });
