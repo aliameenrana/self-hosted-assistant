@@ -31,6 +31,7 @@ from core.tools import WEB_TOOLS
 from core.tool_router import ToolRouter
 from core.tools.memory_tools import build as build_memory_tools
 from core.tools.image_tools import build as build_image_tools
+from core.tools.csv_tools import build as build_csv_tools
 from web import auth
 
 DB = Path(os.getenv("DB_PATH", "data/app.db"))
@@ -38,6 +39,21 @@ QUEUE_CAP = int(os.getenv("QUEUE_DEPTH_CAP", "12"))
 SLOTS = int(os.getenv("PARALLEL_SLOTS", "2"))
 ARTIFACT_TOOLS = {"create_webpage", "crop_image", "resize_image",
                   "convert_image_format", "set_image_transparency"}
+
+
+def _artifact_of(call) -> dict | None:
+    """filter_csv only produces a file when return_file was asked for, and
+    nests it under "file" since the tool's main return value is the match
+    preview, not a file - a different shape than create_webpage/the image
+    tools, which are nothing BUT a file. Flattened here so the frontend
+    only ever has one artifact shape to render."""
+    if call.outcome != "ok":
+        return None
+    if call.name in ARTIFACT_TOOLS:
+        return call.result
+    if call.name == "filter_csv" and isinstance(call.result, dict):
+        return call.result.get("file")
+    return None
 
 log = logging.getLogger("app")
 
@@ -141,13 +157,16 @@ class Ask(BaseModel):
 # disk, so a malicious file leaves nothing behind after parsing.
 _attachments: dict[str, object] = {}
 
-# Images are held separately from text attachments and are NOT popped on
-# first use: a document is read once and its text folded into context, but
-# an image is something tools act on repeatedly across a conversation (crop,
-# then resize the result, ...), so it has to survive more than one message.
+# Images and CSVs are held separately from text attachments and are NOT
+# popped on first use: a document is read once and its text folded into
+# context, but both of these are things tools act on repeatedly across a
+# conversation (crop an image then resize the result, filter a CSV then
+# query it another way), so they have to survive more than one message.
 _images: dict[str, bytes] = {}
+_csvs: dict[str, bytes] = {}
 IMAGE_KINDS = {"image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp"}
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_CSV_BYTES = 8 * 1024 * 1024
 
 
 @app.post("/api/upload")
@@ -158,6 +177,7 @@ async def upload(file: UploadFile = File(...), request: Request = None):
                             headers={"Retry-After": str(retry_after)})
     data = await file.read()
     content_type = (file.content_type or "").split(";")[0]
+    filename = file.filename or "file"
     if content_type in IMAGE_KINDS:
         if len(data) > MAX_IMAGE_BYTES:
             raise HTTPException(400, f"image too large, limit "
@@ -167,11 +187,27 @@ async def upload(file: UploadFile = File(...), request: Request = None):
         if len(_images) > 200:
             for stale in list(_images)[:50]:
                 _images.pop(stale, None)
-        return {"id": key, "name": file.filename or "image",
+        return {"id": key, "name": filename,
                 "kind": IMAGE_KINDS[content_type], "is_image": True,
                 "chars": len(data), "pages": 0, "truncated": False}
+    # Extension checked first, same as core.documents.kind_for: a CSV saved
+    # from Excel commonly arrives as application/vnd.ms-excel or even
+    # text/plain depending on OS and browser, so content-type alone misses it.
+    is_csv = (filename.lower().endswith(".csv")
+             or content_type in ("text/csv", "application/csv"))
+    if is_csv:
+        if len(data) > MAX_CSV_BYTES:
+            raise HTTPException(400, f"file too large, limit "
+                                f"{MAX_CSV_BYTES // 1024 // 1024}MB")
+        key = uuid.uuid4().hex
+        _csvs[key] = data
+        if len(_csvs) > 200:
+            for stale in list(_csvs)[:50]:
+                _csvs.pop(stale, None)
+        return {"id": key, "name": filename, "kind": "csv", "is_csv": True,
+                "chars": len(data), "pages": 0, "truncated": False}
     try:
-        doc = extract(data, file.filename or "file", file.content_type or "")
+        doc = extract(data, filename, file.content_type or "")
     except DocumentError as exc:
         raise HTTPException(400, str(exc))
     key = uuid.uuid4().hex
@@ -294,15 +330,25 @@ async def chat(ask: Ask, request: Request):
     doc = _attachments.pop(ask.attachment, None) if ask.attachment else None
     if doc:
         history = history + [{"role": "system", "content": doc.as_context()}]
-    # Images are not popped here (see _images comment above): the tool
-    # calls, not this handler, are what consume them, and they may be
-    # referenced again in a later message in the same conversation.
+    # Images and CSVs are not popped here (see _images/_csvs comment above):
+    # the tool calls, not this handler, are what consume them, and they may
+    # be referenced again in a later message in the same conversation.
+    force_tools: list[str] = []
     if ask.attachment and ask.attachment in _images:
         history = history + [{"role": "system", "content":
             f"The user has attached an image, id {ask.attachment!r}. Use "
             "crop_image, resize_image, convert_image_format, or "
             "set_image_transparency with this id if they ask you to edit "
             "it, now or in a later message in this conversation."}]
+        force_tools += ["crop_image", "resize_image",
+                        "convert_image_format", "set_image_transparency"]
+    if ask.attachment and ask.attachment in _csvs:
+        history = history + [{"role": "system", "content":
+            f"The user has attached a CSV, id {ask.attachment!r}. Call "
+            "summarize_csv with this id FIRST to see the real column "
+            "names before filtering or aggregating, now or in a later "
+            "message in this conversation."}]
+        force_tools += ["summarize_csv", "filter_csv", "query_csv"]
     question = ask.message
     if switched_from:
         history.append({"role": "system", "content":
@@ -324,7 +370,8 @@ async def chat(ask: Ask, request: Request):
                 harness.registry = {
                     **WEB_TOOLS,
                     **build_memory_tools(memory, session, owner),
-                    **build_image_tools(_images.get)}
+                    **build_image_tools(_images.get),
+                    **build_csv_tools(_csvs.get)}
                 harness.router = ToolRouter(harness.registry)
                 harness.episodic = episodic
                 harness.procedural = procedural
@@ -332,7 +379,8 @@ async def chat(ask: Ask, request: Request):
                 async for ev in harness.answer(question, persona,
                                                history=history,
                                                slot_id=slot_for(session),
-                                               session_id=session):
+                                               session_id=session,
+                                               force_tools=force_tools):
                     if ev["type"] == "token":
                         text += ev["text"]
                         yield _sse(ev)
@@ -370,9 +418,8 @@ async def chat(ask: Ask, request: Request):
                                         "entities": len(ctx.entities),
                                         "facts": len(ctx.long),
                                         "summary": bool(ctx.short)},
-                            "artifacts": [c.result for c in tel.tool_calls
-                                          if c.name in ARTIFACT_TOOLS
-                                          and c.outcome == "ok"],
+                            "artifacts": [a for c in tel.tool_calls
+                                          if (a := _artifact_of(c))],
                             "tools": [{"name": c.name, "outcome": c.outcome,
                                        "retries": c.retries, "ms": c.ms}
                                       for c in tel.tool_calls]}})
@@ -439,12 +486,13 @@ def _persist(session: str, question: str, answer: str, tel) -> None:
 
 ARTIFACTS = Path("data/artifacts")
 ARTIFACT_MEDIA_TYPES = {"html": "text/html", "png": "image/png",
-                        "jpg": "image/jpeg", "webp": "image/webp"}
+                        "jpg": "image/jpeg", "webp": "image/webp",
+                        "csv": "text/csv"}
 
 
 @app.get("/artifacts/{name}")
 def artifact(name: str):
-    m = re.fullmatch(r"([a-z0-9-]+)\.(html|png|jpg|webp)", name)
+    m = re.fullmatch(r"([a-z0-9-]+)\.(html|png|jpg|webp|csv)", name)
     if not m:
         raise HTTPException(404, "no")
     ext = m.group(2)

@@ -3,7 +3,7 @@ const log = $("log"), hello = $("hello"), scroll = $("scroll");
 const input = $("q"), send = $("send"), who = $("who");
 
 let session = null, me = null, busy = false, attachment = null, controller = null;
-let attachmentIsImage = false;
+let attachmentSticky = false, attachmentIcon = "📄";
 let lastModel = null;
 
 // Each one exercises a real tool call end to end, chosen because they
@@ -89,6 +89,9 @@ const STATUS_LABEL = {
   resize_image: "resizing the image",
   convert_image_format: "converting the image",
   set_image_transparency: "adjusting transparency",
+  summarize_csv: "reading the spreadsheet",
+  filter_csv: "filtering rows",
+  query_csv: "crunching the numbers",
 };
 
 function thinking(bubble, label) {
@@ -209,14 +212,18 @@ function artifact(row, a) {
   const box = document.createElement("div");
   box.className = "artifact";
   const isImage = /\.(png|jpg|webp)$/i.test(a.url);
+  const isCsv = /\.csv$/i.test(a.url);
   box.innerHTML = isImage
     ? `<div class="abar"><b></b><a target="_blank">open ↗</a></div>
        <img loading="lazy">`
+    : isCsv
+    ? `<div class="abar"><b></b><a target="_blank">download ↓</a></div>`
     : `<div class="abar"><b></b><a target="_blank">open ↗</a></div>
        <iframe sandbox="allow-popups" loading="lazy"></iframe>`;
-  box.querySelector("b").textContent = a.title || "image";
+  box.querySelector("b").textContent = a.title
+    || (isCsv ? `${a.rows ?? "?"} rows` : "image");
   box.querySelector("a").href = a.url;
-  box.querySelector(isImage ? "img" : "iframe").src = a.url;
+  if (!isCsv) box.querySelector(isImage ? "img" : "iframe").src = a.url;
   row.append(box);
   at();
 }
@@ -245,13 +252,13 @@ $("file").onchange = async e => {
     attachment = null;
   } else {
     attachment = d.id;
-    attachmentIsImage = !!d.is_image;
-    const size = d.is_image ? `${(d.chars / 1024).toFixed(0)}kb`
+    attachmentSticky = !!(d.is_image || d.is_csv);
+    attachmentIcon = d.is_image ? "🖼️" : d.is_csv ? "📊" : "📄";
+    const size = (d.is_image || d.is_csv) ? `${(d.chars / 1024).toFixed(0)}kb`
                 : d.pages ? `${d.pages} pages`
                 : `${(d.chars / 1000).toFixed(1)}k chars`;
-    const icon = d.is_image ? "🖼️" : "📄";
-    box.innerHTML = `${icon} <b>${esc(d.name)}</b> ${size}${d.truncated ? ", truncated" : ""}`;
-    if (d.is_image) {
+    box.innerHTML = `${attachmentIcon} <b>${esc(d.name)}</b> ${size}${d.truncated ? ", truncated" : ""}`;
+    if (attachmentSticky) {
       const hint = document.createElement("span");
       hint.className = "hint";
       hint.textContent = " (stays attached until you remove it)";
@@ -267,7 +274,8 @@ $("file").onchange = async e => {
 };
 
 function clearAttachment() {
-  attachmentIsImage = false;
+  attachmentSticky = false;
+  attachmentIcon = "📄";
   attachment = null;
   $("attached").hidden = true;
   $("attached").innerHTML = "";
@@ -286,12 +294,12 @@ $("f").onsubmit = async e => {
   controller = new AbortController();
 
   const label = attachment ? $("attached").querySelector("b").textContent : null;
-  const icon = attachmentIsImage ? "🖼️" : "📄";
-  turn("you", label ? `${icon} ${label}\n${text}` : text);
-  // An image stays attached across messages (crop, then resize the same
-  // original) since the backend does not pop it on first use, unlike a
-  // text document. Only clear it here for the non-image case.
-  if (!attachmentIsImage) clearAttachment();
+  turn("you", label ? `${attachmentIcon} ${label}\n${text}` : text);
+  // An image or CSV stays attached across messages (crop, then resize the
+  // same original; filter, then query another column) since the backend
+  // does not pop them on first use, unlike a text document. Only clear
+  // here for the non-sticky case.
+  if (!attachmentSticky) clearAttachment();
   const { row, bubble } = turn("them", "");
   thinking(bubble);
 

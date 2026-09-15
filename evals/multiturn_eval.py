@@ -377,11 +377,11 @@ def case_injection_in_live_search():
 
 def case_image_tools():
     """Image upload through to a real tool call and a servable artifact.
-    Each message re-sends the attachment id, matching what the frontend
-    actually does today (it clears the in-flight attachment after the
-    message that included it, same as text documents) - this is not yet a
-    test of cross-turn recall without re-attaching, which the backend
-    permits but the frontend does not currently offer a way to trigger."""
+    Each message re-sends the attachment id, matching what this harness
+    helper does (it has no client-side "stays attached" state to omit it
+    from). The actual frontend now keeps an image attached across messages
+    without re-sending the field each time, a UI-only behaviour this eval
+    cannot exercise since it talks to the API directly."""
     import tempfile
     from PIL import Image as _Image
 
@@ -417,6 +417,59 @@ def case_image_tools():
     return not problems
 
 
+def case_csv_tools():
+    """CSV upload through to summarize, then an aggregate query with a
+    made-up column name the model has to recover from, then a filtered
+    download. Guards the router force_tools fix directly: the query
+    question below has zero lexical overlap with query_csv's own trigger
+    words, so before that fix the router silently offered unrelated tools
+    (get_datetime, search_web) and the model fabricated a number from
+    nothing rather than actually computing it."""
+    import csv
+    import tempfile
+
+    def verify(replies, tels):
+        problems = []
+        if "summarize_csv" not in [x["name"] for x in tels[0]["tools"]]:
+            problems.append("did not call summarize_csv on the first ask")
+        tools1 = [x["name"] for x in tels[1]["tools"]]
+        if "query_csv" not in tools1:
+            problems.append("did not call query_csv for an aggregate "
+                            "question with no lexical overlap to its "
+                            "trigger words - the fabrication this case "
+                            "guards against")
+        if "165" not in replies[1] and "165.0" not in replies[1]:
+            problems.append(f"wrong total, expected 165: {replies[1]!r}")
+        if tels[1].get("flags"):
+            problems.append(f"fabrication flags on query: {tels[1]['flags']}")
+        return problems
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False,
+                                     newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["region", "product", "units", "price"])
+        w.writerow(["North", "Widget", "120", "9.99"])
+        w.writerow(["South", "Widget", "80", "9.99"])
+        w.writerow(["North", "Gadget", "45", "19.99"])
+        path = f.name
+
+    s = Session()
+    csv_id = s.upload(path, "text/csv")
+    replies, tels = [], []
+    for msg in ["what columns does this have and how many rows",
+                "what is the total units sold in the North region"]:
+        text, tel = s.ask(msg, attachment=csv_id)
+        replies.append(text)
+        tels.append(tel)
+    problems = verify(replies, tels)
+    mark = "FAIL" if problems else "ok  "
+    print(f"{mark} csv_tools (summarize, then a query with no lexical "
+         "overlap to its own trigger words)")
+    for p in problems:
+        print(f"      {p}")
+    return not problems
+
+
 CASES.extend([
     case_multihop_chaining,
     case_single_step_not_overchained,
@@ -426,6 +479,7 @@ CASES.extend([
     case_error_recovery_midconversation,
     case_injection_in_live_search,
     case_image_tools,
+    case_csv_tools,
 ])
 
 

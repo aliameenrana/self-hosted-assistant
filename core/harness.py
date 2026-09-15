@@ -86,9 +86,15 @@ def _summarise_result(name: str, result: Any) -> str:
     readable and keeps token cost down when it round-trips through context."""
     if not isinstance(result, dict):
         return str(result)[:120]
-    if "results" in result:
+    # "results" as a list of {"title": ...} hits is search_web's own shape,
+    # not a general contract every tool follows - a different tool using
+    # the same key for something else (found live: query_csv's grouped
+    # aggregate, a dict) must fall through to the generic case below rather
+    # than being indexed as a list and crashing the whole turn on a KeyError.
+    if isinstance(result.get("results"), list):
         n = len(result["results"])
-        first = result["results"][0]["title"] if result["results"] else ""
+        first = (result["results"][0].get("title", "")
+                if n and isinstance(result["results"][0], dict) else "")
         return f"{n} result(s), top: {first[:80]}" if n else "no results"
     if "content" in result:
         return f"{result.get('title') or 'page'}, {len(result['content'])} chars"
@@ -270,7 +276,8 @@ class Harness:
     async def _tool_pass(self, client: httpx.AsyncClient, question: str,
                          history: list[dict], tel: Telemetry,
                          slot_id: int | None = None, on_status=None,
-                         session_id: str | None = None) -> list[dict]:
+                         session_id: str | None = None,
+                         force_tools: list[str] | None = None) -> list[dict]:
         """Pass 1. Characterless. Returns verified tool results only."""
         messages = [{"role": "system", "content": TOOL_PROMPT}, *history,
                     {"role": "user", "content": question}]
@@ -279,6 +286,23 @@ class Harness:
         offered = self.registry
         if self.router:
             offered, tel.tools_offered = self.router.select(question, self.registry)
+        if force_tools:
+            # The lexical router has no idea a CSV or image is attached to
+            # this conversation, only the words in the message. "what is the
+            # total units in the North region" has zero lexical overlap with
+            # query_csv's own trigger words, so the router silently offered
+            # unrelated tools instead and the model picked get_datetime and
+            # fabricated an answer from nothing. An attached file is state
+            # the caller (web/app.py) already knows about directly, so it is
+            # forced into the offered set here rather than trusted to survive
+            # lexical scoring.
+            extra = {n: self.registry[n] for n in force_tools
+                    if n in self.registry and n not in offered}
+            if extra:
+                offered = {**offered, **extra}
+                tel.tools_offered = list(offered)
+                tel.trace.append(f"forced into offer: {', '.join(extra)} "
+                                 "(an attachment is active this turn)")
         if self.procedural:
             recalled = self.procedural.recall(question)
             if recalled:
@@ -551,7 +575,8 @@ class Harness:
     async def answer(self, question: str, persona: str,
                      history: list[dict] | None = None,
                      slot_id: int | None = None,
-                     session_id: str | None = None) -> AsyncIterator[dict]:
+                     session_id: str | None = None,
+                     force_tools: list[str] | None = None) -> AsyncIterator[dict]:
         import asyncio
         status_queue: asyncio.Queue = asyncio.Queue()
 
@@ -566,7 +591,7 @@ class Harness:
         async with httpx.AsyncClient() as client:
             tool_task = asyncio.create_task(
                 self._tool_pass(client, question, history or [], tel, slot_id,
-                                on_status, session_id))
+                                on_status, session_id, force_tools))
             while not tool_task.done():
                 get_status = asyncio.ensure_future(status_queue.get())
                 done, _ = await asyncio.wait(
