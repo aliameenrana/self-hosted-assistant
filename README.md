@@ -1,7 +1,7 @@
 # Self-hosted assistant
 
-A chatbot with five personas, tool use, and a hard rule against claiming a tool
-result it never received. Runs on a GTX 1060 6GB.
+A chatbot with tool use and a hard rule against claiming a tool result it
+never received. Runs on a GTX 1060 6GB.
 
 Design docs live in `docs/`. Start with `docs/architecture.md`.
 
