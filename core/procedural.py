@@ -62,7 +62,7 @@ class Procedural:
             conn.executescript(SCHEMA)
 
     def record_success(self, question: str, tools_used: list[str],
-                       threshold: float = 0.6) -> None:
+                       threshold: float = 0.4) -> None:
         distinct = list(dict.fromkeys(tools_used))  # preserve order, dedupe
         if len(distinct) < MIN_TOOLS:
             return
@@ -104,7 +104,7 @@ class Procedural:
                         "procedures ORDER BY last_used LIMIT ?)",
                         (n - MAX_PROCEDURES,))
 
-    def recall(self, question: str, threshold: float = 0.6) -> list[str] | None:
+    def recall(self, question: str, threshold: float = 0.4) -> list[str] | None:
         """The tool sequence that resolved a similarly shaped question before,
         or None. A procedure used only once is a coincidence, not a pattern,
         so it needs at least two successful uses before it is trusted."""
